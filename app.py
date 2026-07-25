@@ -14,6 +14,7 @@ import streamlit as st
 
 import mood_engine as M
 from data.content import SAMPLE_PROMPTS
+from data.catalog import catalog_summary
 
 # OpenAI API key is injected as OPENAI_API_KEY by Databricks Apps via
 # `valueFrom` in app.yaml (referencing a registered secret resource).
@@ -394,13 +395,26 @@ st.markdown(
     <div style="padding: 1.5rem 0 1rem 0;">
       <h1 class="hero-title">Hackey <span class="accent">Specter</span></h1>
       <p class="hero-sub">
-        Tell us how you want to feel. We'll find the movie, book, podcast, or game that gets you there —
+        Tell us how you want to feel. We'll find the movie or show that gets you there —
         and explain why it'll be the one that stays with you.
       </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+# Catalog source banner: shows where the data is loaded from.
+try:
+    _cat = catalog_summary()
+    _src = _cat["volume_dir"] if _cat["total"] else "no catalog found"
+    st.caption(
+        f"Catalog: {_cat['total']:,} titles "
+        f"({_cat['by_type'].get('movie',0):,} movies · "
+        f"{_cat['by_type'].get('tv',0):,} TV) "
+        f"from `{_src}`"
+    )
+except Exception:
+    st.caption("Catalog: unavailable")
 
 
 # ============================================================
@@ -430,7 +444,7 @@ with tab_search:
     with col2:
         media_filter = st.selectbox(
             "media",
-            ["everything", "movies", "books", "podcasts", "games"],
+            ["everything", "movies", "tv"],
             label_visibility="collapsed",
             key="mood_media",
         )
@@ -469,8 +483,7 @@ with tab_search:
     if active_prompt:
         target = M.parse_mood(active_prompt)
         types_map = {
-            "everything": None, "movies": ["movie"], "books": ["book"],
-            "podcasts": ["podcast"], "games": ["game"],
+            "everything": None, "movies": ["movie"], "tv": ["tv"],
         }
         types = types_map[media_filter]
 
@@ -478,16 +491,28 @@ with tab_search:
         st.markdown(render_mood_summary(target), unsafe_allow_html=True)
         st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
-        results = M.rank(target=target, k=5, types=types)
-        if not results:
+        # Two-stage retrieval: local pre-rank over the full CSV catalog
+        # (no LLM) then ONE LLM call to re-rank + write the "why".
+        recs = M.recommend(target=target, k=5, types=types)
+        if not recs:
             st.warning("Nothing in the library for that yet — try a different feeling.")
         else:
-            for idx, (item, score) in enumerate(results):
+            for idx, r in enumerate(recs):
+                item = r["item"]
+                score = r["score"]
                 with st.container():
                     st.markdown(render_card(item, score), unsafe_allow_html=True)
                     # auto-expand the "why" for the top recommendation
                     with st.expander("Why will I love this?", expanded=(idx == 0)):
-                        st.markdown(render_why(item, target), unsafe_allow_html=True)
+                        st.markdown(
+                            f"""
+                            <div class="why-box">
+                              <strong style="font-style: normal; color: var(--accent);">Why you will love this:</strong><br>
+                              {r["why"]}
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
                     c1, c2, _ = st.columns([1, 1, 4])
                     with c1:
                         if st.button("🎬 I watched/finished this", key=f"finish_{item['id']}"):
@@ -500,8 +525,8 @@ with tab_search:
                             st.toast("Open the **Cross-Media Discovery** tab →", icon="🔗")
 
         # update history
-        if results:
-            st.session_state.history.insert(0, (active_prompt, target, results[0][0]))
+        if recs:
+            st.session_state.history.insert(0, (active_prompt, target, recs[0]["item"]))
             st.session_state.history = st.session_state.history[:6]
 
 

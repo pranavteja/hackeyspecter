@@ -596,4 +596,191 @@ def item_by_id(item_id: str) -> dict | None:
 
 
 def media_type_emoji(t: str) -> str:
-    return {"movie": "🎬", "book": "📖", "podcast": "🎧", "game": "🎮", "music": "🎵"}.get(t, "✨")
+    return {"movie": "🎬", "book": "📖", "podcast": "🎧", "game": "🎮", "music": "🎵", "tv": "📺"}.get(t, "✨")
+
+
+# ============================================================
+# 8. CATALOG-BACKED RANKING (Unity Catalog volume, ~12k items)
+# ============================================================
+# Two-stage retrieval to use the LLM sparingly:
+#   1. rank_catalog()  — local cosine pre-rank over the full CSV
+#      catalog (no LLM). Returns top-N candidates.
+#   2. rerank_llm()    — ONE LLM call per query that re-ranks the
+#      top-N candidates against the user's mood and writes a short
+#      "why" for each kept pick. Falls back to the local order when
+#      no key is set.
+#
+# The curated CONTENT list is kept as a small fallback for the
+# cross-media / festival features that rely on books/podcasts/games
+# which the two CSVs don't cover.
+
+from data.catalog import load_catalog  # noqa: E402
+
+# How many candidates the local stage surfaces to the LLM re-ranker.
+CATALOG_CANDIDATES = 20
+
+
+def rank_catalog(
+    target: dict,
+    k: int = 5,
+    types: Iterable[str] | None = None,
+    exclude_ids: Iterable[str] | None = None,
+    candidates: int = CATALOG_CANDIDATES,
+) -> list[tuple[dict, float]]:
+    """Local cosine pre-rank over the full CSV catalog. No LLM.
+
+    Returns up to `candidates` (item, score) pairs sorted by mood
+    similarity, filtered by media type and exclusions.
+    """
+    pool = load_catalog()
+    exclude_ids = set(exclude_ids or [])
+    types_set = set(types) if types else None
+
+    scored: list[tuple[dict, float]] = []
+    for item in pool:
+        if item["id"] in exclude_ids:
+            continue
+        if types_set and item["type"] not in types_set:
+            continue
+        scored.append((item, _cosine(target, item["mood"])))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[: max(k, candidates)]
+
+
+def _mood_phrase_for_prompt(target: dict) -> str:
+    """Compact human-readable mood description for the LLM prompt."""
+    full = {ax: target.get(ax, 0.5) for ax in MOOD_AXES}
+    bits = [
+        f"{ax}: {_mood_to_phrase(ax, v)}"
+        for ax, v in full.items()
+        if abs(v - 0.5) > 0.15
+    ]
+    return ", ".join(bits) if bits else "a quiet, open feeling"
+
+
+def rerank_llm(
+    target: dict,
+    candidates: list[tuple[dict, float]],
+    k: int = 5,
+) -> list[dict]:
+    """Re-rank `candidates` with ONE LLM call and attach a 'why' to each.
+
+    Returns a list of {item, score, why} of length <= k. Falls back to
+    the local order + rule-based explain() when no key is set or the
+    call fails — so the app always works.
+    """
+    if not candidates:
+        return []
+
+    client = _get_openai_client()
+    # No key -> keep local order, use rule-based why.
+    if client is None:
+        out = []
+        for item, score in candidates[:k]:
+            out.append({
+                "item": item,
+                "score": round(score, 3),
+                "why": explain(item, target),
+            })
+        return out
+
+    # Build a compact candidate list for the prompt. Cap descriptions
+    # to keep the prompt small (one call, cheap).
+    mood_str = _mood_phrase_for_prompt(target)
+    cand_lines = []
+    for i, (item, score) in enumerate(candidates):
+        desc = (item.get("description") or item.get("pitch") or "").strip()
+        desc = (desc[:240] + "…") if len(desc) > 240 else desc
+        genres = ", ".join(item.get("genres", [])[:4]) or "n/a"
+        cand_lines.append(
+            f"{i+1}. {item['title']} ({item['type']}, {item['year']}) "
+            f"[genres: {genres}] — {desc}"
+        )
+    cand_block = "\n".join(cand_lines)
+
+    system = (
+        "You are the re-ranker for Hackey Specter, a mood-first "
+        "recommendation app. You receive a user's target mood and a list "
+        "of candidate titles (pre-ranked by a local mood-similarity model). "
+        "Pick the top titles that best match how the user wants to feel, "
+        "and for each write one short, evocative sentence (<=30 words) "
+        "explaining why it fits that mood. Return STRICT JSON only: "
+        '{"picks":[{"rank":1,"reason":"..."}]}. The number of picks must '
+        "be <= the requested k. Use the candidate numbers as ranks. "
+        "No markdown, no prose outside the JSON."
+    )
+    user = (
+        f"The user wants to feel: {mood_str}.\n"
+        f"Candidates (pre-ranked):\n{cand_block}\n"
+        f"Return the top {k} as JSON."
+    )
+
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = resp.output_text.strip() if hasattr(resp, "output_text") else ""
+        if not text:
+            text = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        text = ""
+
+    # Parse the LLM's re-ranked picks; fall back to local order on any
+    # parse failure so the UI never breaks.
+    order: list[int] = []  # 1-based candidate indices, in LLM-preferred order
+    whys: dict[int, str] = {}
+    if text:
+        try:
+            import json as _json
+            # tolerate stray markdown fences
+            t = text.strip()
+            if t.startswith("```"):
+                t = t.strip("`")
+                t = t[t.find("{"):t.rfind("}") + 1]
+            data = _json.loads(t)
+            for p in data.get("picks", []):
+                r = int(p.get("rank"))
+                if 1 <= r <= len(candidates):
+                    order.append(r)
+                    reason = (p.get("reason") or "").strip()
+                    if reason:
+                        whys[r] = reason
+        except Exception:
+            order = []
+
+    if not order:
+        order = list(range(1, len(candidates) + 1))
+
+    out = []
+    for r in order[:k]:
+        item, score = candidates[r - 1]
+        out.append({
+            "item": item,
+            "score": round(score, 3),
+            "why": whys.get(r) or explain(item, target),
+        })
+    return out
+
+
+def recommend(
+    target: dict,
+    k: int = 5,
+    types: Iterable[str] | None = None,
+    exclude_ids: Iterable[str] | None = None,
+) -> list[dict]:
+    """End-to-end catalog recommendation: local pre-rank + LLM re-rank.
+
+    This is the single entry point the UI should call. It does at most
+    ONE LLM call per query (in rerank_llm), regardless of catalog size.
+    """
+    candidates = rank_catalog(
+        target=target, k=k, types=types, exclude_ids=exclude_ids,
+        candidates=CATALOG_CANDIDATES,
+    )
+    return rerank_llm(target, candidates, k=k)
