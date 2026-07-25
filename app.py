@@ -9,11 +9,33 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import random
+import logging
+from pathlib import Path
 
 import streamlit as st
 
 import mood_engine as M
 from data.content import SAMPLE_PROMPTS
+from recommend_and_pitch import generate_final_recommendation
+from search_engine import StoryDatabase, load_database, vector_search
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+VECTOR_STORE_PATH = Path(__file__).resolve().with_name("stories_vector_store.npz")
+
+
+@st.cache_resource(show_spinner=False)
+def get_story_database() -> StoryDatabase:
+    """Load the offline-built vector store; never rebuild embeddings during app use."""
+    if not VECTOR_STORE_PATH.exists():
+        raise FileNotFoundError(
+            "The offline vector store is missing. Run process_and_embed_dataset "
+            "once to create stories_vector_store.npz."
+        )
+    return load_database(str(VECTOR_STORE_PATH))
 
 # ============================================================
 # PAGE CONFIG
@@ -326,6 +348,20 @@ def render_card(item: dict, score: float | None = None) -> str:
     """
 
 
+def render_summary_card(item: dict, score: float) -> str:
+    """Render a result from summary_1to16000.json without demo metadata."""
+    summary = item.get("summary", "").strip()
+    preview = summary[:700] + ("…" if len(summary) > 700 else "")
+    link = item.get("librivox_project_url", "")
+    link_html = f'<a href="{link}" target="_blank">Open on LibriVox</a>' if link else ""
+    return f'''<div class="card">
+      <div class="type-chip book">Story summary · {score:.2f} match</div>
+      <h3>{item.get("title", "Untitled")}</h3>
+      <div class="pitch">{preview}</div>
+      {link_html}
+    </div>'''
+
+
 def render_why(item: dict, target: dict) -> str:
     return f"""
     <div class="why-box">
@@ -374,11 +410,12 @@ st.markdown(
 # ============================================================
 # TABS
 # ============================================================
-tab_search, tab_concierge, tab_discover, tab_festival = st.tabs([
+tab_search, tab_concierge, tab_discover, tab_festival, tab_context = st.tabs([
     "🔍  Mood First Search",
     "🎯  Weekend Concierge",
     "🔗  Cross-Media Discovery",
     "🎬  Festivals",
+    "🔎  AI Story Search",
 ])
 
 
@@ -668,6 +705,42 @@ with tab_festival:
             st.markdown(render_card(item, entry["score"]), unsafe_allow_html=True)
             with st.expander("Why this one?", expanded=(idx == 0)):
                 st.markdown(render_why(item, template["mood_bias"]), unsafe_allow_html=True)
+
+
+# ============================================================
+# TAB 5: AI STORY SEARCH
+# ============================================================
+with tab_context:
+    st.markdown('<div class="section-label">Semantic story search</div>', unsafe_allow_html=True)
+    st.caption("The story database is embedded offline once. This search embeds only your request, then reranks the closest saved vectors.")
+    story_request = st.text_input("story_search", placeholder="A hopeful story about rebuilding after a breakup", label_visibility="collapsed")
+    if st.button("Search with AI", type="primary"):
+        try:
+            with st.spinner("Embedding your request, searching saved vectors, and choosing the best match…"):
+                candidates = vector_search(story_request, get_story_database(), top_k=5)
+                recommendation = generate_final_recommendation(story_request, candidates)
+                st.session_state.story_search = (recommendation, candidates)
+        except Exception as exc:
+            st.error(f"Search could not run: {exc}")
+
+    saved_search = st.session_state.get("story_search")
+    if saved_search:
+        recommendation, results = saved_search
+        st.markdown(f"### Recommended: {recommendation['recommended_book_title']}")
+        st.markdown(recommendation["pitch_script"])
+        if recommendation["emotional_match_reasons"]:
+            st.markdown("**Why it fits:** " + " · ".join(recommendation["emotional_match_reasons"]))
+        if recommendation["audio_url"]:
+            st.markdown(f"[Listen on LibriVox]({recommendation['audio_url']})")
+        st.markdown("### Closest semantic matches")
+        if results:
+            for item in results:
+                st.markdown(
+                    render_summary_card(item, item.get("vector_similarity", 0.0)),
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No stored story summaries matched those keywords. Try a different description.")
 
 
 # ============================================================

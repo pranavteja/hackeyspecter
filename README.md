@@ -15,15 +15,17 @@ Built in **Python + Streamlit**, deploys to **Databricks Apps** with no external
 | **🔗 Cross-Media Discovery** | Finished a movie? Get 6 emotional cousins — books, games, and podcasts with the same fingerprint. |
 | **💡 Explain Why I Will Love This** | Every pick comes with a generated explanation of which emotional axes line up with your mood. |
 | **🎬 AI Curated Festivals** | 5 ready-to-go festival templates (Lonely Sundays, Wonder Engine, Big Hug, Knife-Edge, Late-Night Longing) that auto-build a 5-item lineup from the catalog. |
+| **🔎 AI Story Search** | Sends a natural-language request to OpenAI for intent extraction, then searches stored story pitches and emotional arcs. |
 
 ## Architecture
 
 ```
 hackeyspecter/
-├── app.py                 # Streamlit UI — single page, 4 tabs
+├── app.py                 # Streamlit UI — single page, 5 tabs
 ├── mood_engine/           # the "AI" — local, deterministic, LLM-swappable
 │   ├── engine.py          #   parse_mood, rank, explain, plan_weekend,
 │   │                      #   unlock_related, generate_festival
+│   ├── check_intent.py    #   OpenAI intent extraction + local story-summary search
 │   └── __init__.py
 ├── data/
 │   └── content.py         # curated 42-item library + mood keyword map
@@ -44,6 +46,23 @@ matching axes plus the item's themes and emotional arc.
 The architecture is **LLM-swappable**: each function takes a string
 or mood vector and returns a dict. Drop in an OpenAI/Anthropic call
 later and you keep the UI.
+
+### AI story-search contract
+
+`mood_engine.check_intent()` sends the user's story request to OpenAI and
+returns a JSON-shaped object with `intent`, `keywords`, `query`, and
+`user_input`. `mood_engine.search_stories()` uses the returned query and
+keywords to search the summaries in `summary_1to16000.json`. Set
+`OPENAI_API_KEY` in `.env` or the deployment environment before use.
+
+### RAG data lifecycle
+
+Run `process_and_embed_dataset("summary_1to16000.json",
+"stories_vector_store.npz")` once whenever the source summaries change. It
+creates the saved feature and vector database. The running app never embeds the
+full JSON file: it loads `stories_vector_store.npz`, embeds only the user's
+query, performs NumPy cosine search, and asks the reranker to pitch the top
+five matches.
 
 ## Run locally
 
