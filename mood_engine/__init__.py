@@ -3,6 +3,7 @@ from .engine import (
     parse_mood,
     rank,
     explain,
+    explain_llm,
     plan_weekend,
     unlock_related,
     generate_festival,
@@ -14,7 +15,7 @@ from .engine import (
 )
 
 __all__ = [
-    "parse_mood", "rank", "explain", "plan_weekend",
+    "parse_mood", "rank", "explain", "explain_llm", "plan_weekend",
     "unlock_related", "generate_festival",
     "all_items", "item_by_id", "media_type_emoji",
     "MOOD_AXES", "FESTIVAL_TEMPLATES",

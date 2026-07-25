@@ -15,6 +15,7 @@ embedding or LLM call is a single drop-in change.
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 from collections import Counter
@@ -265,6 +266,102 @@ def explain(item: dict, target: dict) -> str:
         parts.append(arc + ".")
 
     return " ".join(parts)
+
+
+# ============================================================
+# 3b. LLM-POWERED EXPLAINER (OpenAI, optional)
+# ============================================================
+# Falls back to the rule-based `explain()` when no API key is set,
+# so the app keeps working in local dev or if the secret is absent.
+
+_OPENAI_CLIENT = None  # lazily initialized, cached across calls
+
+
+def _get_openai_client():
+    """Return an OpenAI client if OPENAI_API_KEY is set, else None."""
+    global _OPENAI_CLIENT
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        return None
+    if _OPENAI_CLIENT is None:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return None
+        _OPENAI_CLIENT = OpenAI(api_key=key)
+    return _OPENAI_CLIENT
+
+
+def _mood_to_phrase(axis: str, value: float) -> str:
+    """Human-readable label for one mood axis value, for the prompt."""
+    cls = _classify(axis, value)
+    if cls == "mid":
+        return f"neutral {axis}"
+    return AXIS_PHRASE[axis][cls]
+
+
+def explain_llm(item: dict, target: dict) -> str:
+    """
+    Generate the 'why you will love this' paragraph with OpenAI when a
+    key is available; otherwise fall back to the deterministic `explain`.
+
+    The LLM is given the item's metadata and the user's target mood
+    vector and asked for a single short, evocative paragraph in the
+    cozy-literary voice of the app. Output is plain text (no markdown).
+    """
+    client = _get_openai_client()
+    if client is None:
+        return explain(item, target)
+
+    # Build a compact description of the user's target mood: only the
+    # axes that meaningfully deviate from neutral.
+    full_target = {ax: target.get(ax, 0.5) for ax in MOOD_AXES}
+    mood_bits = [
+        f"{ax}: {_mood_to_phrase(ax, v)}"
+        for ax, v in full_target.items()
+        if abs(v - 0.5) > 0.15
+    ]
+    target_mood_str = ", ".join(mood_bits) if mood_bits else "a quiet, open feeling"
+
+    themes = ", ".join(item.get("themes", [])) or "none"
+    pitch = item.get("pitch", "")
+    arc = item.get("emotional_arc", "")
+
+    system = (
+        "You are the voice of Hackey Specter, a mood-first entertainment "
+        "recommendation app. You write one short, evocative paragraph (2-4 "
+        "sentences, ~50 words) explaining why a specific piece of media is "
+        "the right match for how the user wants to feel. Warm, literary, "
+        "specific, never generic. No marketing fluff, no exclamation marks, "
+        "no markdown, no lists. Speak to the reader in second person."
+    )
+    user = (
+        f"The user wants to feel: {target_mood_str}.\n"
+        f"Recommendation: {item['title']} ({item['type']}, {item['year']}) "
+        f"by {item['creator']}.\n"
+        f"Pitch: {pitch}\n"
+        f"Emotional arc: {arc}\n"
+        f"Themes: {themes}\n"
+        f"Write the 'Why you will love this' paragraph."
+    )
+
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = resp.output_text.strip() if hasattr(resp, "output_text") else ""
+        if not text:
+            # older response shapes
+            text = (resp.choices[0].message.content or "").strip()
+        return text or explain(item, target)
+    except Exception:
+        # Never let an LLM hiccup break the UI — fall back gracefully.
+        return explain(item, target)
 
 
 # ============================================================
