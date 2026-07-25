@@ -347,10 +347,19 @@ def _run_diagnostics() -> dict:
     try:
         from data.catalog import catalog_summary, load_catalog
         s = catalog_summary()
+        detail = (
+            f"{s['total']:,} items (movie={s['by_type'].get('movie',0):,}, "
+            f"tv={s['by_type'].get('tv',0):,})\n"
+            f"volume_dir: {s['volume_dir']}\n"
+            f"volume_listing: {s['volume_listing']}\n"
+            f"netflix: {s['netflix_path']} (exists={s['netflix_exists']})\n"
+            f"kdrama: {s['kdrama_path']} (exists={s['kdrama_exists']})\n"
+        )
+        if s.get("load_errors"):
+            detail += "load_errors:\n  " + "\n  ".join(s["load_errors"])
         results["catalog"] = {
             "ok": s["total"] > 0,
-            "detail": f"{s['total']:,} items (movie={s['by_type'].get('movie',0):,}, "
-                      f"tv={s['by_type'].get('tv',0):,}) from {s['volume_dir']}",
+            "detail": detail,
         }
     except Exception as e:
         results["catalog"] = {

@@ -250,41 +250,79 @@ def _load_kdrama(path: str) -> list[dict]:
     return items
 
 
-def _resolve_paths() -> tuple[str, str]:
-    """Return (netflix_path, kdrama_path), preferring the Unity volume."""
+def _resolve_netflix_path() -> str:
+    """Return the netflix CSV path, preferring the Unity volume."""
     nf_vol = os.path.join(VOLUME_DIR, "netflix_titles.csv")
+    if os.path.exists(nf_vol):
+        return nf_vol
+    return LOCAL_NETFLIX
+
+
+def _resolve_kdrama_path() -> str:
+    """Return the kdrama CSV path, preferring the Unity volume."""
     kd_vol = os.path.join(VOLUME_DIR, "kdramas.csv")
-    if os.path.exists(nf_vol) and os.path.exists(kd_vol):
-        return nf_vol, kd_vol
-    # local dev fallback
-    return LOCAL_NETFLIX, LOCAL_KDRAMA
+    if os.path.exists(kd_vol):
+        return kd_vol
+    return LOCAL_KDRAMA
 
 
 @lru_cache(maxsize=1)
 def load_catalog() -> list[dict]:
-    """Load and cache the unified catalog (both datasets)."""
-    nf_path, kd_path = _resolve_paths()
+    """Load and cache the unified catalog (both datasets, independently)."""
     items: list[dict] = []
+    nf_path = _resolve_netflix_path()
     if os.path.exists(nf_path):
-        items.extend(_load_netflix(nf_path))
+        try:
+            items.extend(_load_netflix(nf_path))
+        except Exception as e:
+            _load_errors.append(f"netflix ({nf_path}): {type(e).__name__}: {e}")
+    else:
+        _load_errors.append(f"netflix: file not found at {nf_path}")
+    kd_path = _resolve_kdrama_path()
     if os.path.exists(kd_path):
-        items.extend(_load_kdrama(kd_path))
+        try:
+            items.extend(_load_kdrama(kd_path))
+        except Exception as e:
+            _load_errors.append(f"kdrama ({kd_path}): {type(e).__name__}: {e}")
+    else:
+        _load_errors.append(f"kdrama: file not found at {kd_path}")
     return items
 
 
+# collect load errors for the diagnostic panel
+_load_errors: list[str] = []
+
+
+def _list_dir(path: str) -> str:
+    """Best-effort directory listing for diagnostics; '' if unavailable."""
+    try:
+        if os.path.isdir(path):
+            entries = os.listdir(path)
+            return ", ".join(sorted(entries)[:20]) or "(empty dir)"
+        return f"(not a dir: {path!r})"
+    except Exception as e:
+        return f"(listing failed: {type(e).__name__}: {e})"
+
+
 def catalog_summary() -> dict:
-    """Quick stats for UI/debugging."""
+    """Quick stats for UI/debugging, including resolved paths + errors."""
     items = load_catalog()
     by_type: dict[str, int] = {}
     by_source: dict[str, int] = {}
     for it in items:
         by_type[it["type"]] = by_type.get(it["type"], 0) + 1
         by_source[it["source"]] = by_source.get(it["source"], 0) + 1
+    nf_path = _resolve_netflix_path()
+    kd_path = _resolve_kdrama_path()
     return {
         "total": len(items),
         "by_type": by_type,
         "by_source": by_source,
         "volume_dir": VOLUME_DIR,
-        "netflix_path": LOCAL_NETFLIX,
-        "kdrama_path": LOCAL_KDRAMA,
+        "volume_listing": _list_dir(VOLUME_DIR),
+        "netflix_path": nf_path,
+        "netflix_exists": os.path.exists(nf_path),
+        "kdrama_path": kd_path,
+        "kdrama_exists": os.path.exists(kd_path),
+        "load_errors": list(_load_errors),
     }
