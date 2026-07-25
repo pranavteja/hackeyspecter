@@ -344,11 +344,10 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
 # ============================================================
-# LLM DIAGNOSTIC PANEL (sidebar) — temporary, for debugging
+# LLM DIAGNOSTIC PANEL — temporary, for debugging. Remove once key works.
 # ============================================================
-# Remove this block once the OpenAI key is confirmed working in prod.
-with st.sidebar:
-    st.markdown("### 🩺 LLM diagnostics")
+with st.container(border=True):
+    st.markdown("### 🩺 LLM diagnostics (temporary debug panel)")
     diag = _llm_diagnostics()
     for k, v in diag.items():
         is_ok = (
@@ -359,7 +358,8 @@ with st.sidebar:
         )
         icon = "✅" if is_ok else "❌"
         st.write(f"{icon} **{k}**: `{v}`")
-    st.caption("If all ✅, the LLM is live. The first ❌ is where it breaks.")
+    st.caption("If all ✅, the LLM is live. The first ❌ is where it breaks. "
+               "Remove this block from app.py once confirmed.")
 
 
 # ============================================================
