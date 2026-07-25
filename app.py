@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import random
 import logging
+import hashlib
 from pathlib import Path
 
 import streamlit as st
 
 import mood_engine as M
 from data.content import SAMPLE_PROMPTS
+from audio_utils import generate_summary_audio, is_playable_audio_url, transcribe_voice_input
 from recommend_and_pitch import generate_final_recommendation
 from search_engine import StoryDatabase, load_database, vector_search
 
@@ -714,12 +716,33 @@ with tab_context:
     st.markdown('<div class="section-label">Semantic story search</div>', unsafe_allow_html=True)
     st.caption("The story database is embedded offline once. This search embeds only your request, then reranks the closest saved vectors.")
     story_request = st.text_input("story_search", placeholder="A hopeful story about rebuilding after a breakup", label_visibility="collapsed")
+    voice_recording = st.audio_input("🎙 Speak your story request")
+    if voice_recording:
+        voice_bytes = voice_recording.getvalue()
+        recording_id = hashlib.sha256(voice_bytes).hexdigest()
+        if recording_id != st.session_state.get("last_voice_recording_id"):
+            try:
+                with st.spinner("You finished speaking — transcribing with OpenAI…"):
+                    st.session_state.voice_story_request = transcribe_voice_input(
+                        voice_bytes,
+                        voice_recording.name or "story-request.wav",
+                        voice_recording.type or "audio/wav",
+                    )
+                    st.session_state.last_voice_recording_id = recording_id
+            except Exception as exc:
+                st.error(f"Voice transcription could not run: {exc}")
+
+    voice_story_request = st.session_state.get("voice_story_request", "")
+    if voice_story_request:
+        st.caption(f"Voice input: “{voice_story_request}”")
+    search_request = story_request.strip() or voice_story_request
     if st.button("Search with AI", type="primary"):
         try:
             with st.spinner("Embedding your request, searching saved vectors, and choosing the best match…"):
-                candidates = vector_search(story_request, get_story_database(), top_k=5)
-                recommendation = generate_final_recommendation(story_request, candidates)
+                candidates = vector_search(search_request, get_story_database(), top_k=5)
+                recommendation = generate_final_recommendation(search_request, candidates)
                 st.session_state.story_search = (recommendation, candidates)
+                st.session_state.pop("recommendation_audio", None)
         except Exception as exc:
             st.error(f"Search could not run: {exc}")
 
@@ -732,6 +755,33 @@ with tab_context:
             st.markdown("**Why it fits:** " + " · ".join(recommendation["emotional_match_reasons"]))
         if recommendation["audio_url"]:
             st.markdown(f"[Listen on LibriVox]({recommendation['audio_url']})")
+
+        recommended_story = next(
+            (item for item in results if item.get("title") == recommendation["recommended_book_title"]),
+            None,
+        )
+        if recommended_story:
+            source_audio_url = recommendation.get("audio_url", "")
+            if is_playable_audio_url(source_audio_url):
+                if st.button("▶ Play recommendation", key="play_recommendation_source"):
+                    st.session_state.recommendation_audio = ("source", source_audio_url)
+            elif st.button("▶ Play story summary with OpenAI", key="play_recommendation_summary"):
+                try:
+                    with st.spinner("Creating summary audio…"):
+                        st.session_state.recommendation_audio = (
+                            "tts",
+                            generate_summary_audio(recommended_story),
+                        )
+                except Exception as exc:
+                    st.error(f"Audio could not be created: {exc}")
+
+            saved_audio = st.session_state.get("recommendation_audio")
+            if saved_audio:
+                source, audio = saved_audio
+                if source == "source":
+                    st.audio(audio)
+                else:
+                    st.audio(audio, format="audio/mpeg")
         st.markdown("### Closest semantic matches")
         if results:
             for item in results:

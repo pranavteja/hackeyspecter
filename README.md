@@ -1,5 +1,9 @@
 # Hackey Specter 🕯️
 
+
+python -c "from preprocess_stories import process_and_embed_dataset; process_and_embed_dataset('summary_1to16000.json', 'stories_vector_store.npz')"
+
+
 > Tell us how you want to feel. We'll find the movie, book, podcast, or game
 > that gets you there — and explain why it'll be the one that stays with you.
 
