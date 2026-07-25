@@ -1,6 +1,43 @@
-command: ["streamlit", "run", "app.py", "--server.port=8000", "--server.address=0.0.0.0"]
+# Databricks Apps manifest for the Hackey Specter Streamlit app.
+#
+# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime
+#
+# Two key facts from the runtime spec:
+#   1. `command` is a sequence (NOT a shell string). The only env-var
+#      expansion performed inside it is `$DATABRICKS_APP_PORT`, which the
+#      Databricks runtime substitutes with the actual listening port
+#      before executing the command.
+#   2. `env` is a list of {name, value} pairs. Env vars defined here are
+#      passed straight to the app process. Streamlit reads many of its
+#      config keys from env vars (STREAMLIT_SERVER_PORT, etc.).
+
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=$DATABRICKS_APP_PORT
+  - --server.address=0.0.0.0
+  - --server.headless=true
+  # On Databricks: $DATABRICKS_APP_PORT is replaced with the real port.
+  # Locally:  you must set DATABRICKS_APP_PORT=8000 in your shell,
+  #           then `streamlit run app.py --server.port=$DATABRICKS_APP_PORT ...`
+
 env:
+  # ---- Streamlit config (also read from env when CLI flags are absent) ----
+  - name: STREAMLIT_SERVER_ADDRESS
+    value: "0.0.0.0"
+  - name: STREAMLIT_SERVER_HEADLESS
+    value: "true"
   - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
     value: "false"
+  - name: STREAMLIT_GATHER_USAGE_STATS
+    value: "false"
   - name: STREAMLIT_THEME_BASE
-    value: "dark"
+    value: "light"
+  - name: STREAMLIT_CLIENT_TOOLBAR_MODE
+    value: "minimal"
+  # ---- App-level env vars (none needed yet — add API keys/secrets here) ----
+  # If you later wire an LLM provider, put the key in a Databricks secret
+  # and reference it like:
+  #   - name: OPENAI_API_KEY
+  #     valueFrom: openai-api-key   # name of a registered secret
