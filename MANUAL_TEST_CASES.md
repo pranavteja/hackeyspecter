@@ -31,26 +31,26 @@ embedding model and saved vector store are used.
 | `I want a tense story about survival in isolation.` | 1. **Highways in Hiding** — `0.379378`<br>2. **Stone** — `0.360879`<br>3. **Kazan** — `0.357711`<br>4. **Fugitive Pieces** — `0.354044`<br>5. **Labyrinth** — `0.346725` |
 | `A hopeful book about rebuilding your life after loss.` | 1. **What Dreams May Come** — `0.402694`<br>2. **Second Chance** — `0.382179`<br>3. **Sisters** — `0.364483`<br>4. **Dr. Heidenhoff's Process** — `0.362253`<br>5. **Disguise** — `0.343974` |
 
-The app shows the direct top-five retrieval results first. Click **Create
-personalized AI pitch** to invoke the LLM reranker; its final single
+The app shows the direct top-five retrieval results first, then automatically
+invokes the LLM reranker in a separate personalization step. Its final single
 recommendation can differ from the first vector result because it considers the
 extracted emotional features.
 
 | # | Input to paste | Expected output |
 |---|---|---|
-| 1 | `I want something that feels like a rainy Sunday after heartbreak.` | A brief retrieval spinner, then **Best semantic match:** and five or fewer semantic-match cards. Click **Create personalized AI pitch** to get a two-sentence recommendation and match reasons. The chosen story should feel reflective, melancholy, romantic, or hopeful. |
+| 1 | `I want something that feels like a rainy Sunday after heartbreak.` | A brief retrieval spinner, then **Best semantic match:** and five or fewer semantic-match cards. A separate personalization spinner follows automatically, then a two-sentence recommendation and match reasons appear. The chosen story should feel reflective, melancholy, romantic, or hopeful. |
 | 2 | `Give me a mysterious story in an unusual world, full of wonder and strange discoveries.` | An immediate semantic match with themes of mystery, fantasy/speculation, exploration, or wonder. Results must show a real title and summary from `summary_1to16000.json`. |
-| 3 | `I need a funny, light escape after a difficult day.` | A lighter or comic semantic match. After clicking **Create personalized AI pitch**, the pitch must explain the emotional fit and remain exactly two sentences. |
+| 3 | `I need a funny, light escape after a difficult day.` | A lighter or comic semantic match, followed automatically by a pitch that explains the emotional fit in exactly two sentences. |
 | 4 | `I want a tense story about survival in isolation.` | A suspenseful, adventurous, or survival-oriented match. Each returned match has a numeric similarity score. |
-| 5 | `A hopeful book about rebuilding your life after loss.` | After optional pitch generation, the pitch references recovery, hope, resilience, or a related emotional arc. |
+| 5 | `A hopeful book about rebuilding your life after loss.` | The automatic pitch references recovery, hope, resilience, or a related emotional arc. |
 | 6 | *(leave the input empty and click Search stories)* | An error explaining that a story, mood, or theme is required. No recommendation cards should replace the previous successful search. |
 | 7 | Temporarily rename `stories_vector_store.npz`, then search for `a quiet historical romance` | An error saying the offline vector store is missing and must be created with `process_and_embed_dataset`. The app must **not** rebuild embeddings automatically. Restore the filename after this test. |
-| 8 | Search the same prompt twice: `a quiet historical romance` | Both searches complete without reprocessing `summary_1to16000.json`; the second search reuses the session retrieval cache. The reranker runs only after clicking **Create personalized AI pitch**. |
+| 8 | Search the same prompt twice: `a quiet historical romance` | Both searches complete without reprocessing `summary_1to16000.json`; the second search reuses the session retrieval and rerank caches. |
 
 ## What to verify in a successful result
 
-- The first spinner covers query embedding and local retrieval only; the top semantic cards appear before any reranker call.
-- Clicking **Create personalized AI pitch** shows a separate spinner and produces `recommended_book_title`, `audio_url`, `pitch_script`, and `emotional_match_reasons`.
+- The first spinner covers query embedding and local retrieval only; the top semantic cards appear before the personalization spinner.
+- The automatic personalization spinner produces `recommended_book_title`, `audio_url`, `pitch_script`, and `emotional_match_reasons`.
 - The displayed matches originate from the offline `.npz` vector database, not from `data/content.py`.
 - The raw source summary displayed in each card belongs to the selected real story.
 - Click **Play story summary with OpenAI** after a recommendation. For the supplied
@@ -60,6 +60,7 @@ extracted emotional features.
   should play that source audio instead.
 - Click the microphone icon, record `I want a hopeful adventure with mystery`,
   then finish the recording using the recorder's stop control. The app should
-  automatically transcribe it and show the voice input; clicking **Search
-  stories** should use it when the typed input is empty.
+  automatically transcribe it, insert the transcript into the text box, and
+  launch the same search and personalization flow without requiring a button
+  click.
 - No OpenAI key is shown in the app, logs, source code, or Git-tracked files.

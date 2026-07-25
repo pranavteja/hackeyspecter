@@ -13,7 +13,8 @@ from unittest.mock import patch
 import numpy as np
 
 from audio_utils import _generate_tts_audio, is_playable_audio_url, summary_for_speech
-from preprocess_stories import _embed_payloads
+from mood_engine.check_intent import check_intent
+from preprocess_stories import _embed_payloads, _extract_features_with_retry
 from recommend_and_pitch import generate_final_recommendation
 from search_engine import (
     StoryDatabase,
@@ -202,6 +203,30 @@ class PreprocessTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "missing, duplicate, or out-of-order"):
             _embed_payloads(["first", "second"], batch_size=2)
+
+    @patch("preprocess_stories._extract_features")
+    def test_retries_a_transient_feature_validation_failure(self, mock_extract: object) -> None:
+        expected = {"record_id": "one"}
+        mock_extract.side_effect = [ValueError("Feature model returned invalid output."), expected]
+        result = _extract_features_with_retry({"title": "One", "summary": "Summary"}, 0)
+        self.assertEqual(result, expected)
+        self.assertEqual(mock_extract.call_count, 2)
+
+
+class IntentTests(unittest.TestCase):
+    @patch("mood_engine.check_intent.get_client")
+    def test_uses_structured_output_and_normalizes_keywords(self, mock_client: object) -> None:
+        mock_client.return_value.responses.create.return_value = SimpleNamespace(output_text=json.dumps({
+            "intent": "comforting fantasy",
+            "keywords": ["Comfort", "MAGIC", "hope"],
+            "query": "comforting magical fantasy",
+        }))
+        result = check_intent("I need a comforting fantasy")
+
+        self.assertEqual(result["keywords"], ["comfort", "magic", "hope"])
+        request = mock_client.return_value.responses.create.call_args.kwargs
+        self.assertEqual(request["text"]["format"]["type"], "json_schema")
+        self.assertFalse(request["store"])
 
 
 if __name__ == "__main__":

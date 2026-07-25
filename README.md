@@ -19,7 +19,7 @@ Built in **Python + Streamlit**, deploys to **Databricks Apps** with no external
 | **🔗 Cross-Media Discovery** | Finished a movie? Get 6 emotional cousins — books, games, and podcasts with the same fingerprint. |
 | **💡 Explain Why I Will Love This** | Every pick comes with a generated explanation of which emotional axes line up with your mood. |
 | **🎬 AI Curated Festivals** | 5 ready-to-go festival templates (Lonely Sundays, Wonder Engine, Big Hug, Knife-Edge, Late-Night Longing) that auto-build a 5-item lineup from the catalog. |
-| **🔎 AI Story Search** | Embeds a natural-language request once, returns saved semantic matches immediately, and generates an optional personalized GPT pitch. |
+| **🔎 AI Story Search** | Embeds a natural-language request once, shows saved semantic matches first, then automatically generates a personalized GPT pitch. |
 
 ## Architecture
 
@@ -55,9 +55,9 @@ later and you keep the UI.
 
 The live story search has two deliberately separate stages. `vector_search()`
 embeds only the user's query, performs exact NumPy cosine ranking against the
-saved story vectors, and returns the closest five records immediately.
-`generate_final_recommendation()` is invoked only when the user asks for a
-personalized pitch; it reranks those five candidates and returns
+saved story vectors, and returns the closest five records first.
+`generate_final_recommendation()` then automatically reranks those five
+candidates while the UI shows a dedicated personalization loader, and returns
 `recommended_record_id`, `recommended_book_title`, `audio_url`,
 `pitch_script`, and `emotional_match_reasons`. Set `OPENAI_API_KEY` in `.env`
 or the deployment environment before use.
@@ -69,7 +69,9 @@ Run `process_and_embed_dataset("summary_1to16000.json",
 creates the saved feature and vector database. The running app never embeds the
 full JSON file: it loads `stories_vector_store.npz`, embeds only the user's
 query, and performs NumPy cosine search. The top five matches render before
-the optional reranker is asked to write a pitch.
+the automatic reranker is asked to write a pitch. If preprocessing is
+interrupted, a model-specific `*.features-cache.json` checkpoint preserves
+successful feature extraction for the next run.
 
 The default quality profile uses `gpt-5.6-sol` for offline feature extraction,
 `gpt-5.6-terra` with low reasoning for live reranking, and

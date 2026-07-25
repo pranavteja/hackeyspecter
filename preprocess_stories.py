@@ -27,6 +27,7 @@ FEATURE_CACHE_SUFFIX = ".features-cache.json"
 MAX_SOURCE_SUMMARY_CHARACTERS = 12_000
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_EMBEDDING_BATCH_SIZE = 96
+FEATURE_EXTRACTION_ATTEMPTS = 2
 EMOTIONAL_AXES = (
     "valence", "energy", "warmth", "tension", "depth", "romance",
     "mystery", "nostalgia", "hope", "melancholy", "wonder", "humor",
@@ -196,6 +197,34 @@ def _extract_features(record: dict[str, Any], index: int) -> dict[str, Any]:
         raise ValueError(f"Feature model returned empty content for {title!r}.")
     features = _validate_features(json.loads(response.output_text), title)
     return _processed_record_from_features(record, index, features)
+
+
+def _extract_features_with_retry(record: dict[str, Any], index: int) -> dict[str, Any]:
+    """Retry a transient malformed/empty model response without retrying bad source data forever."""
+    title = str(record.get("title", "Untitled"))
+    for attempt in range(1, FEATURE_EXTRACTION_ATTEMPTS + 1):
+        try:
+            return _extract_features(record, index)
+        except ValueError as exc:
+            # A missing source summary cannot be repaired by making another API call.
+            if "has no summary" in str(exc) or attempt == FEATURE_EXTRACTION_ATTEMPTS:
+                raise
+            logger.warning(
+                "Feature response validation failed for %r; retrying (%d/%d).",
+                title,
+                attempt + 1,
+                FEATURE_EXTRACTION_ATTEMPTS,
+            )
+        except Exception:
+            if attempt == FEATURE_EXTRACTION_ATTEMPTS:
+                raise
+            logger.warning(
+                "Feature request failed for %r; retrying (%d/%d).",
+                title,
+                attempt + 1,
+                FEATURE_EXTRACTION_ATTEMPTS,
+            )
+    raise RuntimeError("Feature extraction retry loop ended unexpectedly.")
 
 
 def _embed_payloads(payloads: list[str], batch_size: int) -> np.ndarray:
@@ -419,7 +448,7 @@ def process_and_embed_dataset(
         workers = min(max_workers, len(pending_records))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="story-features") as executor:
             futures = {
-                executor.submit(_extract_features, record, index): index
+                executor.submit(_extract_features_with_retry, record, index): index
                 for index, record in pending_records
             }
             for future in as_completed(futures):
