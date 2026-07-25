@@ -348,13 +348,12 @@ def _run_diagnostics() -> dict:
     try:
         from data.catalog import catalog_summary, load_catalog
         s = catalog_summary()
+        types = s.get("by_type", {})
         detail = (
-            f"{s['total']:,} items (movie={s['by_type'].get('movie',0):,}, "
-            f"tv={s['by_type'].get('tv',0):,})\n"
+            f"{s['total']:,} items ({', '.join(f'{k}={v:,}' for k,v in types.items())})\n"
             f"volume_dir: {s['volume_dir']}\n"
             f"volume_listing: {s['volume_listing']}\n"
-            f"netflix: {s['netflix_path']} (exists={s['netflix_exists']})\n"
-            f"kdrama: {s['kdrama_path']} (exists={s['kdrama_exists']})\n"
+            f"summary_path: {s['summary_path']} (exists={s['summary_exists']})\n"
         )
         if s.get("load_errors"):
             detail += "load_errors:\n  " + "\n  ".join(s["load_errors"])

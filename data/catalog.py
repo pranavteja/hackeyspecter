@@ -207,11 +207,28 @@ def _themes_from_summary(summary: str) -> list[str]:
 
 
 def _resolve_summary_path() -> str:
-    """Return the JSON path, preferring the Unity volume."""
+    """Return the JSON path, preferring the Unity volume.
+
+    Falls back to scanning the volume directory for any .json file if
+    the exact filename isn't found, so it works even if the file was
+    uploaded with a slightly different name.
+    """
+    # 1. exact name on the volume
     vol_path = os.path.join(VOLUME_DIR, SUMMARY_FILENAME)
     if os.path.exists(vol_path):
         return vol_path
-    return LOCAL_SUMMARY
+    # 2. any .json in the volume directory (case-insensitive)
+    if os.path.isdir(VOLUME_DIR):
+        try:
+            for entry in sorted(os.listdir(VOLUME_DIR)):
+                if entry.lower().endswith(".json"):
+                    return os.path.join(VOLUME_DIR, entry)
+        except Exception:
+            pass
+    # 3. local dev fallback
+    if os.path.exists(LOCAL_SUMMARY):
+        return LOCAL_SUMMARY
+    return LOCAL_SUMMARY  # returned even if missing — load_catalog reports it
 
 
 # collect load errors for the diagnostic panel
