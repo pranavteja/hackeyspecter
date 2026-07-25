@@ -36,8 +36,25 @@ env:
     value: "light"
   - name: STREAMLIT_CLIENT_TOOLBAR_MODE
     value: "minimal"
-  # ---- App-level env vars (none needed yet — add API keys/secrets here) ----
-  # If you later wire an LLM provider, put the key in a Databricks secret
-  # and reference it like:
-  #   - name: OPENAI_API_KEY
-  #     valueFrom: openai-api-key   # name of a registered secret
+  # ---- App-level env vars ----
+  # OpenAI key for the LLM-generated "Why you will love this" section.
+  # `valueFrom` references a *resource key* (a label you assign when
+  # registering the secret as an app resource), NOT the scope/key path.
+  #
+  # Setup (one-time per workspace):
+  #   1. Create the secret scope + key:
+  #        databricks secrets create-scope llm-secrets
+  #        databricks secrets put-secret --scope llm-secrets --key openai_api_key
+  #   2. Register the secret as an app resource (Apps UI → your app →
+  #      App resources → + Add resource → Secret → scope=llm-secrets,
+  #      key=openai_api_key, permission=Can read, resource key=openai-key)
+  #      OR via databricks.yml (see DATABRICKS_DEPLOY.md).
+  #   3. Databricks injects the secret value as OPENAI_API_KEY at runtime.
+  #
+  # The app gracefully falls back to the rule-based explainer when this
+  # var is absent (e.g. local dev, or before the resource is registered).
+  - name: OPENAI_API_KEY
+    valueFrom: openai-key   # resource key assigned when adding the secret resource
+  # Optional: override the OpenAI model (defaults to gpt-4o-mini).
+  # - name: OPENAI_MODEL
+  #   value: "gpt-4o-mini"

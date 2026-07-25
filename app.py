@@ -15,6 +15,12 @@ import streamlit as st
 import mood_engine as M
 from data.content import SAMPLE_PROMPTS
 
+# OpenAI API key is injected as OPENAI_API_KEY by Databricks Apps via
+# `valueFrom` in app.yaml (referencing a registered secret resource).
+# Locally, `export OPENAI_API_KEY=sk-...` before running. The mood
+# engine reads os.environ["OPENAI_API_KEY"] and falls back to the
+# rule-based explainer when it's absent.
+
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -326,11 +332,37 @@ def render_card(item: dict, score: float | None = None) -> str:
     """
 
 
+def _mood_cache_key(target: dict) -> str:
+    """Stable, compact key for a mood vector (rounded to 2 decimals)."""
+    return ",".join(f"{ax}:{round(target.get(ax, 0.5), 2)}" for ax in M.MOOD_AXES)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_explain_llm(item_id: str, mood_key: str, item_json: str, target_json: str) -> str:
+    """Cached wrapper around the LLM explainer. Args are JSON strings so
+    the cache key is fully hashable; item/target are reconstructed inside."""
+    import json
+    item = json.loads(item_json)
+    target = json.loads(target_json)
+    return M.explain_llm(item, target)
+
+
 def render_why(item: dict, target: dict) -> str:
+    import json
+    # Cache on item id + rounded mood vector; pass JSON for full determinism.
+    mood_key = _mood_cache_key(target)
+    try:
+        why_text = _cached_explain_llm(
+            item["id"], mood_key,
+            json.dumps(item, sort_keys=True),
+            json.dumps(target, sort_keys=True),
+        )
+    except Exception:
+        why_text = M.explain(item, target)
     return f"""
     <div class="why-box">
       <strong style="font-style: normal; color: var(--accent);">Why you will love this:</strong><br>
-      {M.explain(item, target)}
+      {why_text}
     </div>
     """
 
