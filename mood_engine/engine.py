@@ -785,3 +785,76 @@ def recommend(
         candidates=CATALOG_CANDIDATES,
     )
     return rerank_llm(target, candidates, k=k)
+
+
+# ============================================================
+# 9. SPEECH: STT (microphone) + TTS (speaker)
+# ============================================================
+# Both use the same OpenAI client as the LLM explainer. They fall back
+# gracefully (return None / empty) when no key is set so the app keeps
+# working in local dev.
+
+# OpenAI TTS has a ~4096 char input limit; truncate to be safe.
+_TTS_MAX_CHARS = 3000
+
+
+def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/webm") -> str | None:
+    """Transcribe microphone audio to text using OpenAI Whisper (STT).
+
+    Returns the transcribed text, or None if no key is set or the call
+    fails. `mime_type` should match the recorded audio format (Streamlit's
+    st.audio_input typically produces audio/webm).
+    """
+    client = _get_openai_client()
+    if client is None:
+        return None
+    if not audio_bytes:
+        return None
+    # derive a filename with the right extension for the API
+    ext = "webm"
+    if "mp3" in mime_type:
+        ext = "mp3"
+    elif "wav" in mime_type:
+        ext = "wav"
+    elif "ogg" in mime_type:
+        ext = "ogg"
+    filename = f"recording.{ext}"
+    model = os.environ.get("OPENAI_STT_MODEL", "whisper-1")
+    try:
+        resp = client.audio.transcriptions.create(
+            model=model,
+            file=(filename, audio_bytes, mime_type),
+        )
+        # the SDK returns a string by default (response_format=text)
+        if isinstance(resp, str):
+            return resp.strip() or None
+        # verbose response objects have .text
+        return (getattr(resp, "text", "") or "").strip() or None
+    except Exception:
+        return None
+
+
+def speak_text(text: str, voice: str = "alloy") -> bytes | None:
+    """Synthesize speech from text using OpenAI TTS.
+
+    Returns MP3 audio bytes, or None if no key is set or the call fails.
+    The text is truncated to _TTS_MAX_CHARS to stay within the API limit.
+    """
+    client = _get_openai_client()
+    if client is None:
+        return None
+    if not text:
+        return None
+    text = text.strip()[:_TTS_MAX_CHARS]
+    model = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
+    try:
+        resp = client.audio.speech.create(
+            model=model,
+            voice=voice,
+            input=text,
+            response_format="mp3",
+        )
+        # HttpxBinaryResponseContent — .content holds the bytes
+        return resp.content
+    except Exception:
+        return None

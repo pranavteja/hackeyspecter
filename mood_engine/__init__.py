@@ -7,6 +7,8 @@ from .engine import (
     recommend,
     explain,
     explain_llm,
+    transcribe_audio,
+    speak_text,
     plan_weekend,
     unlock_related,
     generate_festival,
@@ -19,7 +21,8 @@ from .engine import (
 
 __all__ = [
     "parse_mood", "rank", "rank_catalog", "rerank_llm", "recommend",
-    "explain", "explain_llm", "plan_weekend",
+    "explain", "explain_llm", "transcribe_audio", "speak_text",
+    "plan_weekend",
     "unlock_related", "generate_festival",
     "all_items", "item_by_id", "media_type_emoji",
     "MOOD_AXES", "FESTIVAL_TEMPLATES",

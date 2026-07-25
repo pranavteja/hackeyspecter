@@ -1,28 +1,20 @@
 """
 Unified catalog loader for Hackey Specter.
 
-Loads the two CSV datasets (Netflix titles + K-dramas) from a Databricks
-Unity Catalog volume when running on Databricks Apps, and falls back to
-the local ~/Downloads copies for dev. Each row is normalized into a
-single item schema and assigned a locally-derived mood vector (no LLM)
-so the mood engine can pre-rank the full ~12k-item catalog cheaply.
+Loads the audiobook summaries JSON from a Databricks Unity Catalog volume
+when running on Databricks Apps, and falls back to the local ~/Downloads
+copy for dev. Each row is normalized into a single item schema and
+assigned a locally-derived mood vector (no LLM) so the mood engine can
+pre-rank the catalog cheaply.
 
 Volume path (Databricks): /Volumes/workspace/default/hackey-data
-  - netflix_titles.csv
-  - kdramas.csv
+  - summary_1to16000.json
 
-Local fallback (dev): ~/Downloads/netflix_titles.csv, ~/Downloads/archive/kdramas.csv
-
-IMPORTANT: When running on Databricks Apps, Unity Catalog volume paths
-(`/Volumes/...`) are NOT real filesystem paths in the app container.
-Direct `open()`, `os.path.exists`, `os.listdir`, etc. all fail there.
-The loader uses the Databricks SDK Files API for any `/Volumes/...` path
-and falls back to regular filesystem calls for local dev paths.
+Local fallback (dev): ~/Downloads/summary_1to16000.json
 """
 from __future__ import annotations
 
-import csv
-import io
+import json
 import os
 import re
 from functools import lru_cache
@@ -31,277 +23,170 @@ from mood_engine.engine import MOOD_AXES
 
 # Databricks Unity Catalog volume (set via env so it's overridable).
 VOLUME_DIR = os.environ.get("HACKEY_DATA_VOLUME", "/Volumes/workspace/default/hackey-data")
-LOCAL_NETFLIX = os.path.expanduser("~/Downloads/netflix_titles.csv")
-LOCAL_KDRAMA = os.path.expanduser("~/Downloads/archive/kdramas.csv")
+LOCAL_SUMMARY = os.path.expanduser("~/Downloads/summary_1to16000.json")
+SUMMARY_FILENAME = "summary_1to16000.json"
 
 
 # ============================================================
-# SDK + PATH HELPERS
+# MOOD KEYWORD DELTAS (for deriving mood from plot summaries)
 # ============================================================
-# Databricks Apps do NOT mount /Volumes/... as a real filesystem path.
-# The Files API on the Databricks SDK is the only way to read them.
-# The SDK import is lazy so the module still loads when the SDK isn't
-# installed (e.g. during fast local dev on the curated content only).
-
-_SDK_IMPORT_ERROR: str | None = None
-
-
-def _get_sdk():
-    """Lazy import of the Databricks SDK. Returns the module or None."""
-    global _SDK_IMPORT_ERROR
-    if _SDK_IMPORT_ERROR is not None:
-        return None
-    try:
-        import databricks.sdk as _sdk
-        from databricks.sdk import WorkspaceClient
-        return _sdk, WorkspaceClient
-    except Exception as ex:  # ImportError, etc.
-        _SDK_IMPORT_ERROR = f"{type(ex).__name__}: {ex}"
-        return None
-
-
-def _clean_api_host(raw: str) -> str:
-    """Strip any path (e.g. /browse/folders/...) from a host URL.
-
-    The Databricks CLI often stores the host as the full workspace browse
-    URL, e.g. `https://dbc-xyz.cloud.databricks.com/browse/folders/123`.
-    The Files API needs only the scheme+netloc, otherwise calls land on
-    the browse page and return HTML.
-    """
-    if not raw:
-        return raw
-    raw = raw.strip()
-    if "://" not in raw:
-        return raw
-    scheme, rest = raw.split("://", 1)
-    # split off any path/query
-    netloc = rest.split("/", 1)[0]
-    return f"{scheme}://{netloc}"
-
-
-@lru_cache(maxsize=1)
-def _workspace_client():
-    """Return a cached WorkspaceClient. Uses the same auth as the Databricks CLI.
-
-    On Databricks Apps: picks up the app's service-principal credentials
-    automatically (DATABRICKS_HOST + OAuth from the runtime).
-    Locally:           uses the `dev` profile from ~/.databrickscfg
-    (set up via `databricks auth login`).
-
-    The host is passed EXPLICITLY (not auto-discovered) and the path
-    stripped, because the CLI config often stores the full workspace
-    browse URL (e.g. .../browse/folders/123), and the SDK's auto-
-    discovery latches onto it — returning HTML for Files API calls.
-    """
-    sdk = _get_sdk()
-    if sdk is None:
-        raise RuntimeError(
-            "databricks-sdk is not installed; required for /Volumes/... access. "
-            "Add `databricks-sdk>=0.30.0` to requirements.txt."
-        )
-    _sdk_mod, WorkspaceClient = sdk
-    from databricks.sdk.core import Config
-
-    # Resolve the API host: prefer DATABRICKS_HOST, fall back to the
-    # CLI profile's host. Always strip the path.
-    host = (
-        os.environ.get("DATABRICKS_HOST")
-        or os.environ.get("DATABRICKS_HOSTNAME")
-    )
-    if not host:
-        try:
-            import configparser
-            cfg_parser = configparser.ConfigParser()
-            cfg_parser.read(os.path.expanduser("~/.databrickscfg"))
-            for section in ("dev", "DEFAULT"):
-                if cfg_parser.has_option(section, "host"):
-                    host = cfg_parser.get(section, "host")
-                    break
-        except Exception:
-            pass
-
-    host = _clean_api_host(host) if host else None
-    if host:
-        cfg = Config(host=host, profile="dev", headers={})
-        return WorkspaceClient(config=cfg)
-    # last-ditch: no explicit host, hope the SDK auto-discovers correctly
-    return WorkspaceClient(profile="dev")
-
-
-def _is_volume_path(path: str) -> bool:
-    return path.startswith("/Volumes/") or path.startswith("Volumes/")
-
-
-def _volume_list(path: str) -> list[dict]:
-    """List entries in a /Volumes/... directory. Returns list of {name, is_dir, size}."""
-    w = _workspace_client()
-    entries = list(w.files.list_directory_contents(path))
-    out = []
-    for e in entries:
-        # path looks like /Volumes/cat/sch/vol/file.csv — keep just the tail
-        name = e.path.rsplit("/", 1)[-1]
-        out.append({"name": name, "is_dir": e.is_directory, "size": e.file_size})
-    return out
-
-
-def _read_volume_text(path: str) -> str:
-    """Read a /Volumes/... file as UTF-8 text via the SDK. Raises on failure."""
-    w = _workspace_client()
-    resp = w.files.download(path)
-    return resp.contents.read().decode("utf-8")
-
-
-def _read_text(path: str) -> str:
-    """Read a file as UTF-8 text. Uses the SDK for /Volumes/..., open() otherwise."""
-    if _is_volume_path(path):
-        return _read_volume_text(path)
-    with open(path, encoding="utf-8") as f:
-        return f.read()
-
-
-def _path_exists(path: str) -> bool:
-    """True if `path` exists. Uses os.path for filesystem, and for /Volumes/...
-    we probe via download() (get_metadata is unreliable on some workspaces)."""
-    if _is_volume_path(path):
-        try:
-            _read_volume_text(path)
-            return True
-        except Exception:
-            return False
-    return os.path.exists(path)
-
-
-def _list_dir_or_volume(path: str) -> str:
-    """Diagnostic-friendly directory listing. Works for both kinds of paths."""
-    try:
-        if _is_volume_path(path):
-            entries = _volume_list(path)
-            names = sorted(e["name"] for e in entries)[:20]
-            return ", ".join(names) or "(empty dir)"
-        if os.path.isdir(path):
-            entries = sorted(os.listdir(path))[:20]
-            return ", ".join(entries) or "(empty dir)"
-        return f"(not a dir: {path!r})"
-    except Exception as e:
-        return f"(listing failed: {type(e).__name__}: {e})"
-
-
-# ============================================================
-# GENRE -> MOOD DELTAS
-# ============================================================
-# Coarse mapping from a genre/keyword to mood-vector deltas. Applied
-# on top of the description-keyword parse so items with thin genres
-# (e.g. documentaries) still get a usable signal from their synopsis.
-GENRE_MOOD = {
-    # tone
+# Merged from the mood engine's MOOD_KEYWORDS + plot-specific terms.
+# Applied to the summary text to produce a 12-axis mood vector locally.
+_KEYWORD_MOOD = {
+    # tone / atmosphere
+    "rainy": {"melancholy": 0.5, "warmth": 0.4, "nostalgia": 0.4, "energy": -0.5},
+    "sunday": {"nostalgia": 0.4, "warmth": 0.3, "melancholy": 0.2, "energy": -0.3},
+    "heartbreak": {"melancholy": 0.7, "warmth": 0.3, "romance": 0.5, "valence": -0.4, "hope": -0.3},
+    "breakup": {"melancholy": 0.6, "romance": 0.4, "warmth": 0.2, "valence": -0.3, "hope": -0.3},
+    "lonely": {"melancholy": 0.5, "warmth": 0.3, "romance": 0.2, "energy": -0.3},
+    "loneliness": {"melancholy": 0.5, "warmth": -0.2, "energy": -0.3},
+    "crying": {"melancholy": 0.6, "energy": -0.5, "hope": -0.2},
+    "cozy": {"warmth": 0.6, "energy": -0.3, "humor": 0.2, "nostalgia": 0.3},
+    "comfort": {"warmth": 0.6, "nostalgia": 0.4, "hope": 0.3, "energy": -0.3},
+    "quiet": {"energy": -0.6, "tension": -0.4, "warmth": 0.3},
+    "slow": {"energy": -0.5, "depth": 0.2},
+    # upbeat
+    "happy": {"valence": 0.6, "hope": 0.4, "humor": 0.3, "energy": 0.3},
+    "joyful": {"valence": 0.7, "hope": 0.5, "energy": 0.4},
+    "joy": {"valence": 0.6, "hope": 0.4, "energy": 0.3},
+    "fun": {"humor": 0.6, "energy": 0.4, "valence": 0.5},
+    "funny": {"humor": 0.7, "valence": 0.4},
+    "humor": {"humor": 0.6, "valence": 0.3},
     "comedy": {"humor": 0.6, "valence": 0.4, "energy": 0.3},
-    "romance": {"romance": 0.7, "warmth": 0.4, "hope": 0.2},
-    "romantic": {"romance": 0.7, "warmth": 0.4, "hope": 0.2},
-    "drama": {"depth": 0.4, "melancholy": 0.3},
-    "tragedy": {"melancholy": 0.7, "valence": -0.5, "hope": -0.4},
-    "thriller": {"tension": 0.7, "energy": 0.4, "mystery": 0.3},
+    "uplifting": {"hope": 0.6, "valence": 0.5, "energy": 0.3},
+    "inspiring": {"hope": 0.7, "wonder": 0.4, "energy": 0.3},
+    "hopeful": {"hope": 0.7, "valence": 0.3, "melancholy": -0.3},
+    "hope": {"hope": 0.6, "valence": 0.3},
+    # dark / heavy
+    "dark": {"warmth": -0.5, "valence": -0.4, "tension": 0.4, "depth": 0.3},
+    "brooding": {"tension": 0.4, "melancholy": 0.4, "warmth": -0.3, "energy": -0.2},
+    "bleak": {"hope": -0.5, "valence": -0.4, "warmth": -0.3, "melancholy": 0.3},
+    "intense": {"energy": 0.6, "tension": 0.5, "depth": 0.2},
+    "scary": {"tension": 0.7, "energy": 0.3, "warmth": -0.3},
+    "spooky": {"mystery": 0.5, "tension": 0.5, "warmth": -0.2},
     "horror": {"tension": 0.8, "energy": 0.4, "warmth": -0.4, "valence": -0.4},
-    "mystery": {"mystery": 0.7, "tension": 0.3, "depth": 0.2},
-    "documentary": {"depth": 0.5, "wonder": 0.3, "energy": -0.2},
-    "documentaries": {"depth": 0.5, "wonder": 0.3, "energy": -0.2},
-    "fantasy": {"wonder": 0.6, "mystery": 0.3, "energy": 0.2},
-    "sci-fi": {"wonder": 0.5, "depth": 0.3, "mystery": 0.3},
-    "science fiction": {"wonder": 0.5, "depth": 0.3, "mystery": 0.3},
+    "thrilling": {"tension": 0.7, "energy": 0.5},
+    "suspenseful": {"tension": 0.7, "mystery": 0.4},
+    "suspense": {"tension": 0.6, "mystery": 0.3},
+    "mysterious": {"mystery": 0.7, "depth": 0.3, "tension": 0.2},
+    "mystery": {"mystery": 0.6, "tension": 0.3},
+    # high energy
+    "exciting": {"energy": 0.6, "tension": 0.3, "valence": 0.3},
+    "adventurous": {"energy": 0.5, "wonder": 0.5, "hope": 0.3},
     "adventure": {"energy": 0.5, "wonder": 0.4, "hope": 0.3},
-    "action": {"energy": 0.7, "tension": 0.4, "valence": 0.2},
-    "crime": {"tension": 0.5, "mystery": 0.4, "depth": 0.3, "warmth": -0.2},
-    "family": {"warmth": 0.6, "hope": 0.5, "humor": 0.4, "valence": 0.4},
-    "kids": {"warmth": 0.5, "humor": 0.5, "valence": 0.4, "energy": 0.3},
-    "children": {"warmth": 0.5, "humor": 0.5, "valence": 0.4, "energy": 0.3},
-    "animation": {"wonder": 0.4, "warmth": 0.3, "humor": 0.3},
-    "anime": {"wonder": 0.4, "energy": 0.3, "mystery": 0.2},
-    "history": {"depth": 0.5, "nostalgia": 0.4, "melancholy": 0.2},
-    "historical": {"depth": 0.5, "nostalgia": 0.4, "melancholy": 0.2},
-    "war": {"tension": 0.5, "melancholy": 0.5, "depth": 0.4, "valence": -0.3},
-    "biography": {"depth": 0.5, "nostalgia": 0.3, "wonder": 0.2},
-    "music": {"energy": 0.4, "warmth": 0.3, "nostalgia": 0.3, "humor": 0.2},
-    "musical": {"energy": 0.4, "warmth": 0.3, "humor": 0.3, "valence": 0.3},
-    "sport": {"energy": 0.5, "hope": 0.4, "valence": 0.3},
-    "sports": {"energy": 0.5, "hope": 0.4, "valence": 0.3},
-    "reality": {"humor": 0.3, "energy": 0.3, "valence": 0.2},
-    "talk": {"humor": 0.3, "warmth": 0.2, "energy": 0.2},
-    "western": {"nostalgia": 0.5, "tension": 0.3, "energy": 0.2},
-    "korean": {"depth": 0.2, "romance": 0.2, "melancholy": 0.2},  # kdramas lean emotional
-    "international": {"depth": 0.2, "wonder": 0.2},
-    "independent": {"depth": 0.4, "melancholy": 0.2, "energy": -0.1},
-    "classic": {"nostalgia": 0.6, "depth": 0.3},
-    "cult": {"wonder": 0.3, "mystery": 0.2, "humor": 0.2},
-    "faith": {"hope": 0.5, "warmth": 0.4, "depth": 0.3},
-    "lgbtq": {"romance": 0.4, "warmth": 0.3, "depth": 0.3},
-    "queer": {"romance": 0.4, "warmth": 0.3, "depth": 0.3},
-}
-
-# Description-keyword deltas (reuses the mood engine's keyword map at
-# parse time; here we keep a small extra set tuned for plot text).
-_DESC_KEYWORD_MOOD = {
-    "love": {"romance": 0.5, "warmth": 0.4, "hope": 0.2},
-    "heartbreak": {"melancholy": 0.6, "romance": 0.4, "valence": -0.4},
+    "epic": {"energy": 0.7, "wonder": 0.6, "depth": 0.3},
+    # romance
+    "romantic": {"romance": 0.8, "warmth": 0.5, "hope": 0.3},
+    "romance": {"romance": 0.7, "warmth": 0.4, "hope": 0.2},
+    "love": {"romance": 0.6, "warmth": 0.5, "hope": 0.3},
+    "loved": {"romance": 0.5, "warmth": 0.4, "hope": 0.2},
+    "yearning": {"romance": 0.6, "melancholy": 0.4, "nostalgia": 0.3},
+    "longing": {"romance": 0.5, "melancholy": 0.5, "nostalgia": 0.4},
+    "passion": {"romance": 0.6, "energy": 0.3, "warmth": 0.3},
+    # thoughtful
+    "deep": {"depth": 0.7, "energy": -0.2},
+    "philosophical": {"depth": 0.8, "wonder": 0.4},
+    "philosophy": {"depth": 0.7, "wonder": 0.3},
+    "thoughtful": {"depth": 0.6, "energy": -0.2, "warmth": 0.2},
+    "meaningful": {"depth": 0.6, "hope": 0.3, "wonder": 0.3},
+    "reflective": {"depth": 0.6, "melancholy": 0.3, "nostalgia": 0.3},
+    "introspective": {"depth": 0.7, "melancholy": 0.3, "energy": -0.3},
+    # nostalgia
+    "nostalgic": {"nostalgia": 0.7, "warmth": 0.3, "melancholy": 0.3},
+    "nostalgia": {"nostalgia": 0.6, "warmth": 0.3, "melancholy": 0.2},
+    "childhood": {"nostalgia": 0.8, "warmth": 0.4, "hope": 0.3},
+    "memory": {"nostalgia": 0.7, "depth": 0.4, "melancholy": 0.3},
+    "remember": {"nostalgia": 0.6, "melancholy": 0.3},
+    "past": {"nostalgia": 0.5, "melancholy": 0.3},
+    # awe / wonder
+    "wonder": {"wonder": 0.7, "humor": -0.2, "hope": 0.3},
+    "magical": {"wonder": 0.7, "warmth": 0.3},
+    "magic": {"wonder": 0.6, "mystery": 0.3},
+    "awe": {"wonder": 0.8, "depth": 0.3},
+    "space": {"wonder": 0.7, "mystery": 0.4},
+    "ocean": {"wonder": 0.6, "warmth": 0.3, "energy": -0.2},
+    "nature": {"wonder": 0.5, "warmth": 0.4, "tension": -0.3},
+    # plot-specific
     "grief": {"melancholy": 0.7, "valence": -0.4, "hope": -0.3},
     "death": {"melancholy": 0.5, "tension": 0.2, "valence": -0.3},
+    "die": {"melancholy": 0.4, "valence": -0.2},
+    "died": {"melancholy": 0.5, "valence": -0.3},
     "survive": {"tension": 0.5, "hope": 0.4, "energy": 0.3},
-    "mystery": {"mystery": 0.6, "tension": 0.3},
+    "survival": {"tension": 0.5, "hope": 0.4, "energy": 0.3},
     "murder": {"tension": 0.5, "mystery": 0.4, "warmth": -0.3},
-    "friend": {"warmth": 0.4, "hope": 0.2},
-    "family": {"warmth": 0.4, "nostalgia": 0.3, "hope": 0.2},
+    "killed": {"tension": 0.4, "mystery": 0.3, "valence": -0.2},
     "war": {"tension": 0.5, "melancholy": 0.4, "depth": 0.3},
-    "magic": {"wonder": 0.6, "mystery": 0.3},
-    "space": {"wonder": 0.6, "mystery": 0.3},
+    "battle": {"tension": 0.4, "energy": 0.3, "depth": 0.2},
+    "friend": {"warmth": 0.4, "hope": 0.2},
+    "friendship": {"warmth": 0.5, "hope": 0.3},
+    "family": {"warmth": 0.4, "nostalgia": 0.3, "hope": 0.2},
     "future": {"wonder": 0.4, "depth": 0.3},
-    "past": {"nostalgia": 0.5, "melancholy": 0.3},
-    "childhood": {"nostalgia": 0.6, "warmth": 0.3, "hope": 0.2},
-    "lonely": {"melancholy": 0.5, "warmth": -0.2},
-    "hope": {"hope": 0.6, "valence": 0.3},
     "dream": {"wonder": 0.4, "hope": 0.3},
+    "dreams": {"wonder": 0.4, "hope": 0.3},
     "revenge": {"tension": 0.5, "energy": 0.3, "warmth": -0.3},
     "secret": {"mystery": 0.5, "tension": 0.2},
+    "secrets": {"mystery": 0.5, "tension": 0.2},
     "journey": {"wonder": 0.4, "hope": 0.3, "energy": 0.2},
-    "funny": {"humor": 0.6, "valence": 0.3},
-    "dark": {"warmth": -0.4, "tension": 0.3, "valence": -0.3},
+    "quest": {"energy": 0.4, "wonder": 0.4, "hope": 0.3},
     "haunting": {"mystery": 0.4, "melancholy": 0.3, "tension": 0.2},
+    "ghost": {"mystery": 0.4, "tension": 0.3, "melancholy": 0.2},
+    "tragedy": {"melancholy": 0.7, "valence": -0.5, "hope": -0.4},
+    "tragic": {"melancholy": 0.6, "valence": -0.4, "hope": -0.3},
+    "loss": {"melancholy": 0.6, "valence": -0.3, "hope": -0.2},
+    "lost": {"melancholy": 0.4, "nostalgia": 0.3, "valence": -0.2},
+    "betrayal": {"tension": 0.4, "melancholy": 0.3, "warmth": -0.3},
+    "betray": {"tension": 0.4, "warmth": -0.3},
+    "faith": {"hope": 0.5, "warmth": 0.4, "depth": 0.3},
+    "redemption": {"hope": 0.6, "depth": 0.4, "valence": 0.3},
+    "forgive": {"warmth": 0.4, "hope": 0.4},
+    "forgiveness": {"warmth": 0.5, "hope": 0.5},
+    "courage": {"hope": 0.5, "energy": 0.3, "depth": 0.3},
+    "brave": {"hope": 0.4, "energy": 0.3},
+    "fear": {"tension": 0.5, "energy": 0.2, "warmth": -0.2},
+    "afraid": {"tension": 0.4, "warmth": -0.2},
+    "danger": {"tension": 0.5, "energy": 0.3},
+    "escape": {"tension": 0.4, "energy": 0.3, "hope": 0.3},
+    "freedom": {"hope": 0.5, "energy": 0.3, "valence": 0.3},
+    "justice": {"depth": 0.4, "hope": 0.3, "tension": 0.2},
+    "power": {"energy": 0.4, "tension": 0.3, "depth": 0.3},
+    "kingdom": {"wonder": 0.3, "energy": 0.2, "depth": 0.2},
+    "king": {"depth": 0.3, "nostalgia": 0.2, "energy": 0.2},
+    "queen": {"depth": 0.3, "nostalgia": 0.2, "energy": 0.2},
+    "god": {"wonder": 0.4, "depth": 0.4},
+    "gods": {"wonder": 0.4, "depth": 0.4, "mystery": 0.2},
+    "spiritual": {"wonder": 0.4, "depth": 0.4, "hope": 0.3},
+    "sacred": {"wonder": 0.3, "depth": 0.3, "warmth": 0.2},
 }
 
 _TOKEN_RE = re.compile(r"[a-z][a-z\-]+")
-_PAREN_RE = re.compile(r"\(.*?\)")
 
 
 def _tokenize(text: str) -> list[str]:
     text = (text or "").lower()
-    text = _PAREN_RE.sub(" ", text)
     return _TOKEN_RE.findall(text)
 
 
-def _derive_mood(genres: list[str], description: str) -> dict:
-    """Derive a 12-axis mood vector locally from genres + description.
+def _derive_mood(summary: str) -> dict:
+    """Derive a 12-axis mood vector locally from the summary text.
 
-    Starts at neutral 0.5, applies genre deltas (weighted by count) then
-    description-keyword deltas, and clamps to [0,1]. No LLM involved.
+    Starts at neutral 0.5, applies keyword deltas (count-weighted, capped),
+    and clamps to [0,1]. No LLM involved.
     """
     vec = {ax: 0.5 for ax in MOOD_AXES}
+    tokens = _tokenize(summary)
+    if not tokens:
+        return vec
 
-    # genre deltas
-    for g in genres:
-        key = g.lower().strip()
-        deltas = GENRE_MOOD.get(key)
-        if deltas:
-            for ax, d in deltas.items():
-                vec[ax] = vec.get(ax, 0.5) + d
-
-    # description-keyword deltas (count-weighted, capped)
-    tokens = _tokenize(description)
     counts: dict[str, int] = {}
     for t in tokens:
         counts[t] = counts.get(t, 0) + 1
-    for kw, deltas in _DESC_KEYWORD_MOOD.items():
+
+    for kw, deltas in _KEYWORD_MOOD.items():
         n = counts.get(kw, 0)
         if n:
-            weight = min(n, 3)  # cap repeated influence
+            weight = min(n, 4)  # cap repeated influence
             for ax, d in deltas.items():
-                vec[ax] = vec.get(ax, 0.5) + d * weight * 0.5
+                vec[ax] = vec.get(ax, 0.5) + d * weight * 0.4
 
     # clamp
     for ax in MOOD_AXES:
@@ -309,171 +194,105 @@ def _derive_mood(genres: list[str], description: str) -> dict:
     return vec
 
 
-def _themes_from_genres(genres: list[str]) -> list[str]:
-    """Light theme extraction: use genres as themes, deduped, lowercased."""
-    seen = []
-    for g in genres:
-        g = g.strip().lower()
-        if g and g not in seen:
-            seen.append(g)
-    return seen[:6]
+def _themes_from_summary(summary: str) -> list[str]:
+    """Extract a few theme keywords from the summary (top mood keywords found)."""
+    tokens = _tokenize(summary)
+    counts: dict[str, int] = {}
+    for t in tokens:
+        counts[t] = counts.get(t, 0) + 1
+    # pick keywords that appear and are in our mood map
+    found = [(kw, counts[kw]) for kw in _KEYWORD_MOOD if counts.get(kw, 0) > 0]
+    found.sort(key=lambda x: x[1], reverse=True)
+    return [kw for kw, _ in found[:6]]
 
 
-def _split_genres(raw: str) -> list[str]:
-    if not raw:
-        return []
-    return [g.strip() for g in re.split(r"[,/]", raw) if g.strip()]
-
-
-def _parse_year(raw: str) -> int | None:
-    if not raw or raw == "\\N":
-        return None
-    m = re.search(r"(\d{4})", str(raw))
-    return int(m.group(1)) if m else None
-
-
-def _parse_runtime(raw: str) -> int | None:
-    """Parse '90 min', '2 Seasons', or a bare number of minutes."""
-    if not raw or raw == "\\N":
-        return None
-    m = re.search(r"(\d+)", str(raw))
-    if not m:
-        return None
-    n = int(m.group(1))
-    low = str(raw).lower()
-    if "season" in low:
-        return n  # seasons count kept as-is; downstream treats as runtime-ish
-    return n
-
-
-def _load_netflix(path: str) -> list[dict]:
-    """Parse the Netflix CSV at `path` (volume or local)."""
-    text = _read_text(path)
-    items = []
-    for row in csv.DictReader(io.StringIO(text)):
-        title = (row.get("title") or "").strip()
-        if not title:
-            continue
-        genres = _split_genres(row.get("listed_in", ""))
-        desc = (row.get("description") or "").strip()
-        kind = (row.get("type") or "").strip().lower()
-        media_type = "movie" if kind == "movie" else "tv"
-        year = _parse_year(str(row.get("release_year") or ""))
-        runtime = _parse_runtime(str(row.get("duration") or ""))
-        director = (row.get("director") or "").strip()
-        items.append({
-            "id": "nf_" + (row.get("show_id") or "").strip(),
-            "title": title,
-            "creator": director or "Unknown",
-            "year": year or 0,
-            "type": media_type,
-            "runtime": runtime,
-            "genres": genres,
-            "themes": _themes_from_genres(genres),
-            "description": desc,
-            "pitch": desc,  # use the synopsis as the pitch
-            "emotional_arc": "",  # not available; LLM fills the "why"
-            "mood": _derive_mood(genres, desc),
-            "source": "netflix",
-        })
-    return items
-
-
-def _load_kdrama(path: str) -> list[dict]:
-    """Parse the KDrama CSV at `path` (volume or local)."""
-    text = _read_text(path)
-    items = []
-    for row in csv.DictReader(io.StringIO(text)):
-        title = (row.get("title") or "").strip()
-        if not title:
-            continue
-        genres = _split_genres(row.get("genres", ""))
-        desc = (row.get("synopsis") or "").strip()
-        year = _parse_year(str(row.get("startYear") or ""))
-        runtime = _parse_runtime(str(row.get("runtimeMinutes") or ""))
-        lead = (row.get("mainLead1") or "").strip()
-        items.append({
-            "id": "kd_" + (row.get("id") or "").strip(),
-            "title": title,
-            "creator": lead or "Unknown",
-            "year": year or 0,
-            "type": "tv",
-            "runtime": runtime,
-            "genres": genres,
-            "themes": _themes_from_genres(genres),
-            "description": desc,
-            "pitch": desc,
-            "emotional_arc": "",
-            "mood": _derive_mood(genres, desc),
-            "source": "kdrama",
-        })
-    return items
-
-
-def _resolve_netflix_path() -> str:
-    """Return the netflix CSV path, preferring the Unity volume."""
-    nf_vol = os.path.join(VOLUME_DIR, "netflix_titles.csv")
-    if _path_exists(nf_vol):
-        return nf_vol
-    return LOCAL_NETFLIX
-
-
-def _resolve_kdrama_path() -> str:
-    """Return the kdrama CSV path, preferring the Unity volume."""
-    kd_vol = os.path.join(VOLUME_DIR, "kdramas.csv")
-    if _path_exists(kd_vol):
-        return kd_vol
-    return LOCAL_KDRAMA
-
-
-@lru_cache(maxsize=1)
-def load_catalog() -> list[dict]:
-    """Load and cache the unified catalog (both datasets, independently)."""
-    global _load_errors
-    _load_errors = []  # reset on each uncached load
-    items: list[dict] = []
-    nf_path = _resolve_netflix_path()
-    if _path_exists(nf_path):
-        try:
-            items.extend(_load_netflix(nf_path))
-        except Exception as e:
-            _load_errors.append(f"netflix ({nf_path}): {type(e).__name__}: {e}")
-    else:
-        _load_errors.append(f"netflix: file not found at {nf_path}")
-    kd_path = _resolve_kdrama_path()
-    if _path_exists(kd_path):
-        try:
-            items.extend(_load_kdrama(kd_path))
-        except Exception as e:
-            _load_errors.append(f"kdrama ({kd_path}): {type(e).__name__}: {e}")
-    else:
-        _load_errors.append(f"kdrama: file not found at {kd_path}")
-    return items
+def _resolve_summary_path() -> str:
+    """Return the JSON path, preferring the Unity volume."""
+    vol_path = os.path.join(VOLUME_DIR, SUMMARY_FILENAME)
+    if os.path.exists(vol_path):
+        return vol_path
+    return LOCAL_SUMMARY
 
 
 # collect load errors for the diagnostic panel
 _load_errors: list[str] = []
 
 
+@lru_cache(maxsize=1)
+def load_catalog() -> list[dict]:
+    """Load and cache the audiobook catalog from the JSON file."""
+    _load_errors.clear()
+    path = _resolve_summary_path()
+    items: list[dict] = []
+
+    if not os.path.exists(path):
+        _load_errors.append(f"file not found at {path}")
+        return items
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        _load_errors.append(f"JSON parse error ({path}): {type(e).__name__}: {e}")
+        return items
+
+    if not isinstance(data, list):
+        _load_errors.append(f"expected a JSON list, got {type(data).__name__}")
+        return items
+
+    for i, row in enumerate(data):
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        summary = (row.get("summary") or "").strip()
+        items.append({
+            "id": f"ab_{i}",
+            "title": title,
+            "creator": "LibriVox",
+            "year": 0,
+            "type": "audiobook",
+            "runtime": None,
+            "genres": [],
+            "themes": _themes_from_summary(summary),
+            "description": summary,
+            "pitch": (summary[:200] + "…") if len(summary) > 200 else summary,
+            "emotional_arc": "",
+            "mood": _derive_mood(summary),
+            "source": "librivox",
+            "audio_zip_url": row.get("audio_zip_url", ""),
+            "librivox_project_url": row.get("librivox_project_url", ""),
+        })
+
+    return items
+
+
+def _list_dir(path: str) -> str:
+    """Best-effort directory listing for diagnostics; '' if unavailable."""
+    try:
+        if os.path.isdir(path):
+            entries = os.listdir(path)
+            return ", ".join(sorted(entries)[:20]) or "(empty dir)"
+        return f"(not a dir: {path!r})"
+    except Exception as e:
+        return f"(listing failed: {type(e).__name__}: {e})"
+
+
 def catalog_summary() -> dict:
-    """Quick stats for UI/debugging, including resolved paths + errors."""
+    """Quick stats for UI/debugging, including resolved path + errors."""
     items = load_catalog()
     by_type: dict[str, int] = {}
     by_source: dict[str, int] = {}
     for it in items:
         by_type[it["type"]] = by_type.get(it["type"], 0) + 1
         by_source[it["source"]] = by_source.get(it["source"], 0) + 1
-    nf_path = _resolve_netflix_path()
-    kd_path = _resolve_kdrama_path()
+    path = _resolve_summary_path()
     return {
         "total": len(items),
         "by_type": by_type,
         "by_source": by_source,
         "volume_dir": VOLUME_DIR,
-        "volume_listing": _list_dir_or_volume(VOLUME_DIR),
-        "netflix_path": nf_path,
-        "netflix_exists": _path_exists(nf_path),
-        "kdrama_path": kd_path,
-        "kdrama_exists": _path_exists(kd_path),
+        "volume_listing": _list_dir(VOLUME_DIR),
+        "summary_path": path,
+        "summary_exists": os.path.exists(path),
         "load_errors": list(_load_errors),
     }

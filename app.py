@@ -333,7 +333,8 @@ def _run_diagnostics() -> dict:
         import mood_engine as _M
         missing = [
             n for n in ("recommend", "rank_catalog", "rerank_llm",
-                        "parse_mood", "explain", "explain_llm")
+                        "parse_mood", "explain", "explain_llm",
+                        "transcribe_audio", "speak_text")
             if not hasattr(_M, n)
         ]
         results["mood_engine"] = {
@@ -395,6 +396,30 @@ def _run_diagnostics() -> dict:
             "ok": False,
             "detail": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
         }
+
+    # 5. STT (Whisper) — check the function is reachable. We don't make a
+    # real call because we'd need real audio bytes; the openai probe above
+    # already confirms the client.
+    try:
+        from mood_engine import transcribe_audio
+        stt_model = os.environ.get("OPENAI_STT_MODEL", "whisper-1")
+        results["stt"] = {
+            "ok": callable(transcribe_audio),
+            "detail": f"transcribe_audio callable; model={stt_model}",
+        }
+    except Exception as e:
+        results["stt"] = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+
+    # 6. TTS — same; we don't burn a real TTS call at boot.
+    try:
+        from mood_engine import speak_text
+        tts_model = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
+        results["tts"] = {
+            "ok": callable(speak_text),
+            "detail": f"speak_text callable; model={tts_model}",
+        }
+    except Exception as e:
+        results["tts"] = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
 
     return results
 
@@ -547,6 +572,13 @@ tab_search, tab_concierge, tab_discover, tab_festival = st.tabs([
 # ============================================================
 # TAB 1: MOOD FIRST SEARCH
 # ============================================================
+# Cached TTS wrapper so clicking the speaker button repeatedly doesn't
+# re-call the OpenAI TTS API. Keyed on (item_id, summary_excerpt).
+@st.cache_data(show_spinner=True, ttl=3600)
+def _cached_tts(item_id: str, excerpt: str) -> bytes | None:
+    return M.speak_text(excerpt)
+
+
 with tab_search:
     st.markdown('<div class="section-label">Try one of these, or type your own</div>', unsafe_allow_html=True)
 
@@ -561,6 +593,9 @@ with tab_search:
                 st.session_state["mood_input"] = sample
                 st.rerun()
 
+    # Text input + microphone on the same row. The mic widget records in
+    # the browser; when audio is returned we transcribe it via OpenAI
+    # Whisper and pipe the text into the mood-input field.
     col1, col2 = st.columns([4, 1])
     with col1:
         prompt = st.text_input(
@@ -570,17 +605,40 @@ with tab_search:
             key="mood_input",
         )
     with col2:
-        media_filter = st.selectbox(
-            "media",
-            ["everything", "movies", "tv"],
-            label_visibility="collapsed",
-            key="mood_media",
+        mic_audio = st.audio_input(
+            "🎙️",
+            label_visibility="visible",
+            key="mood_mic",
         )
+
+    # If the user just recorded, transcribe and put the text in the input.
+    if mic_audio is not None:
+        mime = getattr(mic_audio, "type", "audio/webm") or "audio/webm"
+        audio_bytes = mic_audio.getvalue() if hasattr(mic_audio, "getvalue") else mic_audio.read()
+        # avoid re-transcribing on every rerun: only transcribe if we
+        # haven't already for this audio
+        cache_key = ("stt", len(audio_bytes), hash(audio_bytes[:256]))
+        if st.session_state.get("mic_last_key") != cache_key:
+            with st.spinner("Transcribing…"):
+                transcript = M.transcribe_audio(audio_bytes, mime)
+            st.session_state["mic_last_key"] = cache_key
+            st.session_state["mic_last_text"] = transcript or ""
+            if transcript:
+                st.session_state["mood_input"] = transcript
+            st.rerun()
+        elif st.session_state.get("mic_last_text") and not prompt:
+            # if the text input is empty after transcription, surface it
+            prompt = st.session_state["mic_last_text"]
 
     # Clean up the legacy one-shot key if it was set by an older version.
     st.session_state.pop("active_sample", None)
 
     active_prompt = (prompt or "").strip()
+    st.caption(
+        "💡 Tip: click 🎙️ to speak your mood — it transcribes via Whisper and "
+        "fills this box automatically." if mic_audio is None else
+        "🎙️ recording processed — edit the text or re-record."
+    )
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -592,7 +650,8 @@ with tab_search:
                 "I want something that feels like a rainy Sunday after heartbreak."
               </p>
               <p style="font-size:0.85rem; color:var(--ink-dim);">
-                Type a feeling, pick a sample above, and the mood engine will translate it into picks across movies, books, podcasts, and games.
+                Type a feeling, speak into the mic, or pick a sample above. The
+                mood engine will find audiobooks from the LibriVox catalog.
               </p>
             </div>
             """,
@@ -601,19 +660,15 @@ with tab_search:
 
     if active_prompt:
         target = M.parse_mood(active_prompt)
-        types_map = {
-            "everything": None, "movies": ["movie"], "tv": ["tv"],
-        }
-        types = types_map[media_filter]
 
         st.markdown(f"**You said:** *\"{active_prompt}\"*")
         st.markdown(render_mood_summary(target), unsafe_allow_html=True)
         st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
-        # Two-stage retrieval: local pre-rank over the full CSV catalog
+        # Two-stage retrieval: local pre-rank over the full catalog
         # (no LLM) then ONE LLM call to re-rank + write the "why".
         try:
-            recs = M.recommend(target=target, k=5, types=types)
+            recs = M.recommend(target=target, k=5)
         except Exception as e:
             import traceback as _tb
             st.session_state.diag["recommend_runtime"] = {
@@ -640,16 +695,35 @@ with tab_search:
                             """,
                             unsafe_allow_html=True,
                         )
-                    c1, c2, _ = st.columns([1, 1, 4])
+                    # Action row: finished / discover / listen
+                    c1, c2, c3, _ = st.columns([1, 1, 1, 3])
                     with c1:
-                        if st.button("🎬 I watched/finished this", key=f"finish_{item['id']}"):
+                        if st.button("🎧 Finished", key=f"finish_{item['id']}"):
                             if item["id"] not in st.session_state.finished:
                                 st.session_state.finished.append(item["id"])
                             st.toast(f"Added **{item['title']}** to your finished shelf", icon="🕯️")
                     with c2:
-                        if st.button("🔗 See what else fits", key=f"goto_{item['id']}"):
+                        if st.button("🔗 Related", key=f"goto_{item['id']}"):
                             st.session_state["discover_seed"] = item["id"]
-                            st.toast("Open the **Cross-Media Discovery** tab →", icon="🔗")
+                            st.toast("Open **Cross-Media Discovery** →", icon="🔗")
+                    with c3:
+                        # Speaker button: TTS the summary. The summary
+                        # is truncated to ~500 chars to keep TTS short
+                        # and snappy; the full text is shown above.
+                        summary = item.get("description", "") or item.get("pitch", "")
+                        excerpt = (summary[:500] + "…") if len(summary) > 500 else summary
+                        if st.button(f"🔊 Listen", key=f"tts_{item['id']}"):
+                            audio_bytes = _cached_tts(item["id"], excerpt)
+                            if audio_bytes is None:
+                                st.warning(
+                                    "TTS unavailable — set `OPENAI_API_KEY` "
+                                    "in the app to enable audio playback."
+                                )
+                            else:
+                                st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                        # show the excerpt below the button as a small caption
+                        if excerpt:
+                            st.caption(excerpt[:200] + ("…" if len(excerpt) > 200 else ""))
 
         # update history
         if recs:
