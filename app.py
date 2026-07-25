@@ -405,21 +405,6 @@ if "diag" not in st.session_state:
     except Exception as e:
         st.session_state.diag = {"_run": {"ok": False, "detail": f"{type(e).__name__}: {e}"}}
 
-with st.sidebar:
-    st.markdown("### 🩺 Diagnostics")
-    diag = st.session_state.get("diag", {})
-    all_ok = all(d.get("ok", False) for d in diag.values()) if diag else False
-    st.markdown(f"**Overall:** {'✅ all checks passed' if all_ok else '❌ see failures below'}")
-    for name, d in diag.items():
-        icon = "✅" if d.get("ok") else "❌"
-        with st.expander(f"{icon} {name}", expanded=not d.get("ok", False)):
-            st.code(d.get("detail", ""), language="text")
-    if st.button("Re-run diagnostics", use_container_width=True):
-        st.session_state.diag = _run_diagnostics()
-        st.rerun()
-    st.markdown("---")
-    st.caption("Copy the failing section's text to report an error.")
-
 
 # ============================================================
 # HELPERS
@@ -522,6 +507,30 @@ try:
     )
 except Exception:
     st.caption("Catalog: unavailable")
+
+
+# ============================================================
+# DIAGNOSTIC PANEL (main page) — surfaces import/load errors so
+# they can be reported. Auto-collapses when everything is healthy.
+# ============================================================
+diag = st.session_state.get("diag", {})
+_all_ok = all(d.get("ok", False) for d in diag.values()) if diag else False
+with st.expander(
+    f"🩺 Diagnostics — {'✅ all checks passed' if _all_ok else '❌ see failures below'}",
+    expanded=not _all_ok,
+):
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        if st.button("Re-run", use_container_width=True):
+            st.session_state.diag = _run_diagnostics()
+            st.rerun()
+    with c2:
+        st.caption("Copy a failing section's text to report an error.")
+    for name, d in diag.items():
+        icon = "✅" if d.get("ok") else "❌"
+        st.markdown(f"**{icon} {name}**")
+        st.code(d.get("detail", ""), language="text")
+        st.markdown("")
 
 
 # ============================================================
