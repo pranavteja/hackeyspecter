@@ -12,10 +12,17 @@ Volume path (Databricks): /Volumes/workspace/default/hackey-data
   - kdramas.csv
 
 Local fallback (dev): ~/Downloads/netflix_titles.csv, ~/Downloads/archive/kdramas.csv
+
+IMPORTANT: When running on Databricks Apps, Unity Catalog volume paths
+(`/Volumes/...`) are NOT real filesystem paths in the app container.
+Direct `open()`, `os.path.exists`, `os.listdir`, etc. all fail there.
+The loader uses the Databricks SDK Files API for any `/Volumes/...` path
+and falls back to regular filesystem calls for local dev paths.
 """
 from __future__ import annotations
 
 import csv
+import io
 import os
 import re
 from functools import lru_cache
@@ -26,6 +33,157 @@ from mood_engine.engine import MOOD_AXES
 VOLUME_DIR = os.environ.get("HACKEY_DATA_VOLUME", "/Volumes/workspace/default/hackey-data")
 LOCAL_NETFLIX = os.path.expanduser("~/Downloads/netflix_titles.csv")
 LOCAL_KDRAMA = os.path.expanduser("~/Downloads/archive/kdramas.csv")
+
+
+# ============================================================
+# SDK + PATH HELPERS
+# ============================================================
+# Databricks Apps do NOT mount /Volumes/... as a real filesystem path.
+# The Files API on the Databricks SDK is the only way to read them.
+# The SDK import is lazy so the module still loads when the SDK isn't
+# installed (e.g. during fast local dev on the curated content only).
+
+_SDK_IMPORT_ERROR: str | None = None
+
+
+def _get_sdk():
+    """Lazy import of the Databricks SDK. Returns the module or None."""
+    global _SDK_IMPORT_ERROR
+    if _SDK_IMPORT_ERROR is not None:
+        return None
+    try:
+        import databricks.sdk as _sdk
+        from databricks.sdk import WorkspaceClient
+        return _sdk, WorkspaceClient
+    except Exception as ex:  # ImportError, etc.
+        _SDK_IMPORT_ERROR = f"{type(ex).__name__}: {ex}"
+        return None
+
+
+def _clean_api_host(raw: str) -> str:
+    """Strip any path (e.g. /browse/folders/...) from a host URL.
+
+    The Databricks CLI often stores the host as the full workspace browse
+    URL, e.g. `https://dbc-xyz.cloud.databricks.com/browse/folders/123`.
+    The Files API needs only the scheme+netloc, otherwise calls land on
+    the browse page and return HTML.
+    """
+    if not raw:
+        return raw
+    raw = raw.strip()
+    if "://" not in raw:
+        return raw
+    scheme, rest = raw.split("://", 1)
+    # split off any path/query
+    netloc = rest.split("/", 1)[0]
+    return f"{scheme}://{netloc}"
+
+
+@lru_cache(maxsize=1)
+def _workspace_client():
+    """Return a cached WorkspaceClient. Uses the same auth as the Databricks CLI.
+
+    On Databricks Apps: picks up the app's service-principal credentials
+    automatically (DATABRICKS_HOST + OAuth from the runtime).
+    Locally:           uses the `dev` profile from ~/.databrickscfg
+    (set up via `databricks auth login`).
+
+    The host is passed EXPLICITLY (not auto-discovered) and the path
+    stripped, because the CLI config often stores the full workspace
+    browse URL (e.g. .../browse/folders/123), and the SDK's auto-
+    discovery latches onto it — returning HTML for Files API calls.
+    """
+    sdk = _get_sdk()
+    if sdk is None:
+        raise RuntimeError(
+            "databricks-sdk is not installed; required for /Volumes/... access. "
+            "Add `databricks-sdk>=0.30.0` to requirements.txt."
+        )
+    _sdk_mod, WorkspaceClient = sdk
+    from databricks.sdk.core import Config
+
+    # Resolve the API host: prefer DATABRICKS_HOST, fall back to the
+    # CLI profile's host. Always strip the path.
+    host = (
+        os.environ.get("DATABRICKS_HOST")
+        or os.environ.get("DATABRICKS_HOSTNAME")
+    )
+    if not host:
+        try:
+            import configparser
+            cfg_parser = configparser.ConfigParser()
+            cfg_parser.read(os.path.expanduser("~/.databrickscfg"))
+            for section in ("dev", "DEFAULT"):
+                if cfg_parser.has_option(section, "host"):
+                    host = cfg_parser.get(section, "host")
+                    break
+        except Exception:
+            pass
+
+    host = _clean_api_host(host) if host else None
+    if host:
+        cfg = Config(host=host, profile="dev", headers={})
+        return WorkspaceClient(config=cfg)
+    # last-ditch: no explicit host, hope the SDK auto-discovers correctly
+    return WorkspaceClient(profile="dev")
+
+
+def _is_volume_path(path: str) -> bool:
+    return path.startswith("/Volumes/") or path.startswith("Volumes/")
+
+
+def _volume_list(path: str) -> list[dict]:
+    """List entries in a /Volumes/... directory. Returns list of {name, is_dir, size}."""
+    w = _workspace_client()
+    entries = list(w.files.list_directory_contents(path))
+    out = []
+    for e in entries:
+        # path looks like /Volumes/cat/sch/vol/file.csv — keep just the tail
+        name = e.path.rsplit("/", 1)[-1]
+        out.append({"name": name, "is_dir": e.is_directory, "size": e.file_size})
+    return out
+
+
+def _read_volume_text(path: str) -> str:
+    """Read a /Volumes/... file as UTF-8 text via the SDK. Raises on failure."""
+    w = _workspace_client()
+    resp = w.files.download(path)
+    return resp.contents.read().decode("utf-8")
+
+
+def _read_text(path: str) -> str:
+    """Read a file as UTF-8 text. Uses the SDK for /Volumes/..., open() otherwise."""
+    if _is_volume_path(path):
+        return _read_volume_text(path)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _path_exists(path: str) -> bool:
+    """True if `path` exists. Uses os.path for filesystem, and for /Volumes/...
+    we probe via download() (get_metadata is unreliable on some workspaces)."""
+    if _is_volume_path(path):
+        try:
+            _read_volume_text(path)
+            return True
+        except Exception:
+            return False
+    return os.path.exists(path)
+
+
+def _list_dir_or_volume(path: str) -> str:
+    """Diagnostic-friendly directory listing. Works for both kinds of paths."""
+    try:
+        if _is_volume_path(path):
+            entries = _volume_list(path)
+            names = sorted(e["name"] for e in entries)[:20]
+            return ", ".join(names) or "(empty dir)"
+        if os.path.isdir(path):
+            entries = sorted(os.listdir(path))[:20]
+            return ", ".join(entries) or "(empty dir)"
+        return f"(not a dir: {path!r})"
+    except Exception as e:
+        return f"(listing failed: {type(e).__name__}: {e})"
 
 
 # ============================================================
@@ -189,71 +347,73 @@ def _parse_runtime(raw: str) -> int | None:
 
 
 def _load_netflix(path: str) -> list[dict]:
+    """Parse the Netflix CSV at `path` (volume or local)."""
+    text = _read_text(path)
     items = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            title = (row.get("title") or "").strip()
-            if not title:
-                continue
-            genres = _split_genres(row.get("listed_in", ""))
-            desc = (row.get("description") or "").strip()
-            kind = (row.get("type") or "").strip().lower()
-            media_type = "movie" if kind == "movie" else "tv"
-            year = _parse_year(str(row.get("release_year") or ""))
-            runtime = _parse_runtime(str(row.get("duration") or ""))
-            director = (row.get("director") or "").strip()
-            items.append({
-                "id": "nf_" + (row.get("show_id") or "").strip(),
-                "title": title,
-                "creator": director or "Unknown",
-                "year": year or 0,
-                "type": media_type,
-                "runtime": runtime,
-                "genres": genres,
-                "themes": _themes_from_genres(genres),
-                "description": desc,
-                "pitch": desc,  # use the synopsis as the pitch
-                "emotional_arc": "",  # not available; LLM fills the "why"
-                "mood": _derive_mood(genres, desc),
-                "source": "netflix",
-            })
+    for row in csv.DictReader(io.StringIO(text)):
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        genres = _split_genres(row.get("listed_in", ""))
+        desc = (row.get("description") or "").strip()
+        kind = (row.get("type") or "").strip().lower()
+        media_type = "movie" if kind == "movie" else "tv"
+        year = _parse_year(str(row.get("release_year") or ""))
+        runtime = _parse_runtime(str(row.get("duration") or ""))
+        director = (row.get("director") or "").strip()
+        items.append({
+            "id": "nf_" + (row.get("show_id") or "").strip(),
+            "title": title,
+            "creator": director or "Unknown",
+            "year": year or 0,
+            "type": media_type,
+            "runtime": runtime,
+            "genres": genres,
+            "themes": _themes_from_genres(genres),
+            "description": desc,
+            "pitch": desc,  # use the synopsis as the pitch
+            "emotional_arc": "",  # not available; LLM fills the "why"
+            "mood": _derive_mood(genres, desc),
+            "source": "netflix",
+        })
     return items
 
 
 def _load_kdrama(path: str) -> list[dict]:
+    """Parse the KDrama CSV at `path` (volume or local)."""
+    text = _read_text(path)
     items = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            title = (row.get("title") or "").strip()
-            if not title:
-                continue
-            genres = _split_genres(row.get("genres", ""))
-            desc = (row.get("synopsis") or "").strip()
-            year = _parse_year(str(row.get("startYear") or ""))
-            runtime = _parse_runtime(str(row.get("runtimeMinutes") or ""))
-            lead = (row.get("mainLead1") or "").strip()
-            items.append({
-                "id": "kd_" + (row.get("id") or "").strip(),
-                "title": title,
-                "creator": lead or "Unknown",
-                "year": year or 0,
-                "type": "tv",
-                "runtime": runtime,
-                "genres": genres,
-                "themes": _themes_from_genres(genres),
-                "description": desc,
-                "pitch": desc,
-                "emotional_arc": "",
-                "mood": _derive_mood(genres, desc),
-                "source": "kdrama",
-            })
+    for row in csv.DictReader(io.StringIO(text)):
+        title = (row.get("title") or "").strip()
+        if not title:
+            continue
+        genres = _split_genres(row.get("genres", ""))
+        desc = (row.get("synopsis") or "").strip()
+        year = _parse_year(str(row.get("startYear") or ""))
+        runtime = _parse_runtime(str(row.get("runtimeMinutes") or ""))
+        lead = (row.get("mainLead1") or "").strip()
+        items.append({
+            "id": "kd_" + (row.get("id") or "").strip(),
+            "title": title,
+            "creator": lead or "Unknown",
+            "year": year or 0,
+            "type": "tv",
+            "runtime": runtime,
+            "genres": genres,
+            "themes": _themes_from_genres(genres),
+            "description": desc,
+            "pitch": desc,
+            "emotional_arc": "",
+            "mood": _derive_mood(genres, desc),
+            "source": "kdrama",
+        })
     return items
 
 
 def _resolve_netflix_path() -> str:
     """Return the netflix CSV path, preferring the Unity volume."""
     nf_vol = os.path.join(VOLUME_DIR, "netflix_titles.csv")
-    if os.path.exists(nf_vol):
+    if _path_exists(nf_vol):
         return nf_vol
     return LOCAL_NETFLIX
 
@@ -261,7 +421,7 @@ def _resolve_netflix_path() -> str:
 def _resolve_kdrama_path() -> str:
     """Return the kdrama CSV path, preferring the Unity volume."""
     kd_vol = os.path.join(VOLUME_DIR, "kdramas.csv")
-    if os.path.exists(kd_vol):
+    if _path_exists(kd_vol):
         return kd_vol
     return LOCAL_KDRAMA
 
@@ -269,9 +429,11 @@ def _resolve_kdrama_path() -> str:
 @lru_cache(maxsize=1)
 def load_catalog() -> list[dict]:
     """Load and cache the unified catalog (both datasets, independently)."""
+    global _load_errors
+    _load_errors = []  # reset on each uncached load
     items: list[dict] = []
     nf_path = _resolve_netflix_path()
-    if os.path.exists(nf_path):
+    if _path_exists(nf_path):
         try:
             items.extend(_load_netflix(nf_path))
         except Exception as e:
@@ -279,7 +441,7 @@ def load_catalog() -> list[dict]:
     else:
         _load_errors.append(f"netflix: file not found at {nf_path}")
     kd_path = _resolve_kdrama_path()
-    if os.path.exists(kd_path):
+    if _path_exists(kd_path):
         try:
             items.extend(_load_kdrama(kd_path))
         except Exception as e:
@@ -291,17 +453,6 @@ def load_catalog() -> list[dict]:
 
 # collect load errors for the diagnostic panel
 _load_errors: list[str] = []
-
-
-def _list_dir(path: str) -> str:
-    """Best-effort directory listing for diagnostics; '' if unavailable."""
-    try:
-        if os.path.isdir(path):
-            entries = os.listdir(path)
-            return ", ".join(sorted(entries)[:20]) or "(empty dir)"
-        return f"(not a dir: {path!r})"
-    except Exception as e:
-        return f"(listing failed: {type(e).__name__}: {e})"
 
 
 def catalog_summary() -> dict:
@@ -319,10 +470,10 @@ def catalog_summary() -> dict:
         "by_type": by_type,
         "by_source": by_source,
         "volume_dir": VOLUME_DIR,
-        "volume_listing": _list_dir(VOLUME_DIR),
+        "volume_listing": _list_dir_or_volume(VOLUME_DIR),
         "netflix_path": nf_path,
-        "netflix_exists": os.path.exists(nf_path),
+        "netflix_exists": _path_exists(nf_path),
         "kdrama_path": kd_path,
-        "kdrama_exists": os.path.exists(kd_path),
+        "kdrama_exists": _path_exists(kd_path),
         "load_errors": list(_load_errors),
     }
