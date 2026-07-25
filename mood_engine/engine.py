@@ -614,8 +614,8 @@ def media_type_emoji(t: str) -> str:
 # cross-media / festival features that rely on books/podcasts/games
 # which the two CSVs don't cover.
 
-from data.catalog import load_catalog  # noqa: E402
-
+# NOTE: imported lazily inside the functions to avoid a circular import
+# (data/catalog.py imports MOOD_AXES from this module at load time).
 # How many candidates the local stage surfaces to the LLM re-ranker.
 CATALOG_CANDIDATES = 20
 
@@ -632,6 +632,7 @@ def rank_catalog(
     Returns up to `candidates` (item, score) pairs sorted by mood
     similarity, filtered by media type and exclusions.
     """
+    from data.catalog import load_catalog  # lazy: avoid circular import
     pool = load_catalog()
     exclude_ids = set(exclude_ids or [])
     types_set = set(types) if types else None

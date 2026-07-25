@@ -8,6 +8,7 @@ Run: streamlit run app.py
 """
 from __future__ import annotations
 
+import os
 import random
 
 import streamlit as st
@@ -315,6 +316,103 @@ if "festival" not in st.session_state:
 
 
 # ============================================================
+# DIAGNOSTIC PANEL — surfaces import/load errors for reporting.
+# Runs once per session and stores results in session state so it
+# doesn't repeat expensive checks on every rerun.
+# ============================================================
+def _run_diagnostics() -> dict:
+    """Probe the key components the app depends on. Returns a dict of
+    {name: {ok: bool, detail: str}}. Safe to call even if imports fail."""
+    import importlib
+    import traceback
+
+    results = {}
+
+    # 1. mood_engine exports
+    try:
+        import mood_engine as _M
+        missing = [
+            n for n in ("recommend", "rank_catalog", "rerank_llm",
+                        "parse_mood", "explain", "explain_llm")
+            if not hasattr(_M, n)
+        ]
+        results["mood_engine"] = {
+            "ok": not missing,
+            "detail": f"missing exports: {missing}" if missing else "all exports present",
+        }
+    except Exception as e:
+        results["mood_engine"] = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+
+    # 2. catalog load
+    try:
+        from data.catalog import catalog_summary, load_catalog
+        s = catalog_summary()
+        results["catalog"] = {
+            "ok": s["total"] > 0,
+            "detail": f"{s['total']:,} items (movie={s['by_type'].get('movie',0):,}, "
+                      f"tv={s['by_type'].get('tv',0):,}) from {s['volume_dir']}",
+        }
+    except Exception as e:
+        results["catalog"] = {
+            "ok": False,
+            "detail": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+        }
+
+    # 3. OpenAI key + client
+    try:
+        key = os.environ.get("OPENAI_API_KEY", "")
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        from mood_engine.engine import _get_openai_client
+        client = _get_openai_client()
+        results["openai"] = {
+            "ok": client is not None,
+            "detail": f"key={'set' if key else 'NOT SET'} (len={len(key)}), "
+                      f"model={model}, client={'init' if client else 'none'}",
+        }
+    except Exception as e:
+        results["openai"] = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+
+    # 4. a live recommend() call (the path that failed)
+    try:
+        from mood_engine import recommend, parse_mood
+        recs = recommend(parse_mood("cozy and funny"), k=2)
+        results["recommend"] = {
+            "ok": bool(recs),
+            "detail": f"returned {len(recs)} picks; top="
+                      f"{recs[0]['item']['title']!r}" if recs else "returned no picks",
+        }
+    except Exception as e:
+        results["recommend"] = {
+            "ok": False,
+            "detail": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+        }
+
+    return results
+
+
+if "diag" not in st.session_state:
+    try:
+        st.session_state.diag = _run_diagnostics()
+    except Exception as e:
+        st.session_state.diag = {"_run": {"ok": False, "detail": f"{type(e).__name__}: {e}"}}
+
+with st.sidebar:
+    st.markdown("### 🩺 Diagnostics")
+    diag = st.session_state.get("diag", {})
+    all_ok = all(d.get("ok", False) for d in diag.values()) if diag else False
+    st.markdown(f"**Overall:** {'✅ all checks passed' if all_ok else '❌ see failures below'}")
+    for name, d in diag.items():
+        icon = "✅" if d.get("ok") else "❌"
+        with st.expander(f"{icon} {name}", expanded=not d.get("ok", False)):
+            st.code(d.get("detail", ""), language="text")
+    if st.button("Re-run diagnostics", use_container_width=True):
+        st.session_state.diag = _run_diagnostics()
+        st.rerun()
+    st.markdown("---")
+    st.caption("Copy the failing section's text to report an error.")
+
+
+# ============================================================
 # HELPERS
 # ============================================================
 def render_card(item: dict, score: float | None = None) -> str:
@@ -493,7 +591,15 @@ with tab_search:
 
         # Two-stage retrieval: local pre-rank over the full CSV catalog
         # (no LLM) then ONE LLM call to re-rank + write the "why".
-        recs = M.recommend(target=target, k=5, types=types)
+        try:
+            recs = M.recommend(target=target, k=5, types=types)
+        except Exception as e:
+            import traceback as _tb
+            st.session_state.diag["recommend_runtime"] = {
+                "ok": False,
+                "detail": f"{type(e).__name__}: {e}\n{_tb.format_exc()}",
+            }
+            recs = []
         if not recs:
             st.warning("Nothing in the library for that yet — try a different feeling.")
         else:
