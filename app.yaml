@@ -58,3 +58,21 @@ env:
   # Optional: override the OpenAI model (defaults to gpt-4o-mini).
   # - name: OPENAI_MODEL
   #   value: "gpt-4o-mini"
+
+# ------------------------------------------------------------
+# Unity Catalog volume containing the LibriVox audiobook
+# summaries (summary_1to16000.json). The app reads from
+# /Volumes/workspace/default/hackey-data at runtime.
+#
+# Register this volume as an app resource (Apps UI → your app →
+# App resources → + Add resource → Volume → catalog=workspace,
+# schema=default, volume=hackey-data, permission=Can read,
+# resource key=hackey-data) OR keep the resources block below
+# if you deploy with a databricks.yml bundle.
+# ------------------------------------------------------------
+resources:
+  - name: hackey-data
+    volume:
+      catalog_name: workspace
+      schema_name: default
+      volume_name: hackey-data

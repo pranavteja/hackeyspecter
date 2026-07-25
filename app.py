@@ -354,6 +354,7 @@ def _run_diagnostics() -> dict:
             f"volume_dir: {s['volume_dir']}\n"
             f"volume_listing: {s['volume_listing']}\n"
             f"summary_path: {s['summary_path']} (exists={s['summary_exists']})\n"
+            f"volumes_root probe:\n{s.get('volumes_root','(n/a)')}\n"
         )
         if s.get("load_errors"):
             detail += "load_errors:\n  " + "\n  ".join(s["load_errors"])

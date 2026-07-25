@@ -289,9 +289,52 @@ def _list_dir(path: str) -> str:
         if os.path.isdir(path):
             entries = os.listdir(path)
             return ", ".join(sorted(entries)[:20]) or "(empty dir)"
-        return f"(not a dir: {path!r})"
+        if os.path.exists(path):
+            return f"(exists but is not a dir: type={_file_kind(path)})"
+        return f"(does not exist: {path!r})"
     except Exception as e:
         return f"(listing failed: {type(e).__name__}: {e})"
+
+
+def _file_kind(path: str) -> str:
+    try:
+        import stat
+        st = os.stat(path)
+        if stat.S_ISDIR(st.st_mode):
+            return "dir"
+        if stat.S_ISREG(st.st_mode):
+            return "file"
+        if stat.S_ISLNK(st.st_mode):
+            return "symlink"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _volumes_root_probe() -> str:
+    """List the top of /Volumes so we can see what's actually attached."""
+    root = "/Volumes"
+    try:
+        if not os.path.exists(root):
+            return f"({root} does not exist — volume not attached)"
+        if not os.path.isdir(root):
+            return f"({root} exists but is not a dir)"
+        entries = os.listdir(root)
+        if not entries:
+            return f"({root} exists but is empty)"
+        # try a level deeper too
+        lines = [f"{root}: " + ", ".join(sorted(entries))]
+        for e in sorted(entries)[:5]:
+            sub = os.path.join(root, e)
+            if os.path.isdir(sub):
+                try:
+                    sub_entries = os.listdir(sub)
+                    lines.append(f"  {sub}/: " + ", ".join(sorted(sub_entries)[:10]))
+                except Exception:
+                    pass
+        return "\n".join(lines)
+    except Exception as e:
+        return f"(probe failed: {type(e).__name__}: {e})"
 
 
 def catalog_summary() -> dict:
@@ -309,6 +352,7 @@ def catalog_summary() -> dict:
         "by_source": by_source,
         "volume_dir": VOLUME_DIR,
         "volume_listing": _list_dir(VOLUME_DIR),
+        "volumes_root": _volumes_root_probe(),
         "summary_path": path,
         "summary_exists": os.path.exists(path),
         "load_errors": list(_load_errors),
