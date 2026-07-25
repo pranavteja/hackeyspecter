@@ -8,61 +8,18 @@ Run: streamlit run app.py
 """
 from __future__ import annotations
 
-import os
 import random
 
 import streamlit as st
 
 import mood_engine as M
-from data.content import CONTENT, SAMPLE_PROMPTS
+from data.content import SAMPLE_PROMPTS
 
 # OpenAI API key is injected as OPENAI_API_KEY by Databricks Apps via
 # `valueFrom` in app.yaml (referencing a registered secret resource).
 # Locally, `export OPENAI_API_KEY=sk-...` before running. The mood
 # engine reads os.environ["OPENAI_API_KEY"] and falls back to the
 # rule-based explainer when it's absent.
-
-
-# ============================================================
-# LLM DIAGNOSTIC — helps debug why the fallback is being used
-# ============================================================
-def _llm_diagnostics() -> dict:
-    """Probe each layer of the LLM path and return a status dict."""
-    diag = {}
-    key = os.environ.get("OPENAI_API_KEY", "")
-    diag["key_set"] = bool(key)
-    diag["key_prefix"] = key[:6] + "..." if key else "<empty>"
-    diag["key_len"] = len(key)
-    diag["openai_model_env"] = os.environ.get("OPENAI_MODEL", "<unset -> gpt-4o-mini>")
-    try:
-        import openai
-        diag["openai_import"] = f"ok (v{openai.__version__})"
-    except Exception as e:
-        diag["openai_import"] = f"FAILED: {type(e).__name__}: {e}"
-        diag["client_init"] = "skipped (openai not importable)"
-        diag["test_call"] = "skipped"
-        return diag
-    try:
-        from mood_engine.engine import _get_openai_client
-        c = _get_openai_client()
-        diag["client_init"] = "ok" if c is not None else "None (no key or import error)"
-    except Exception as e:
-        diag["client_init"] = f"FAILED: {type(e).__name__}: {e}"
-        diag["test_call"] = "skipped"
-        return diag
-    if c is None:
-        diag["test_call"] = "skipped (client is None)"
-        return diag
-    try:
-        item = CONTENT[0]
-        target = {ax: 0.5 for ax in M.MOOD_AXES}
-        target["valence"] = 0.8
-        out = M.explain_llm(item, target)
-        diag["test_call"] = f"ok ({len(out)} chars): {out[:120]}..."
-    except Exception as e:
-        import traceback
-        diag["test_call"] = f"FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}"
-    return diag
 
 # ============================================================
 # PAGE CONFIG
@@ -341,25 +298,6 @@ h1, h2, h3, h4 {
 """
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
-
-
-# ============================================================
-# LLM DIAGNOSTIC PANEL — temporary, for debugging. Remove once key works.
-# ============================================================
-with st.container(border=True):
-    st.markdown("### 🩺 LLM diagnostics (temporary debug panel)")
-    diag = _llm_diagnostics()
-    for k, v in diag.items():
-        is_ok = (
-            (k == "key_set" and v is True)
-            or (k == "openai_import" and str(v).startswith("ok"))
-            or (k == "client_init" and str(v) == "ok")
-            or (k == "test_call" and str(v).startswith("ok"))
-        )
-        icon = "✅" if is_ok else "❌"
-        st.write(f"{icon} **{k}**: `{v}`")
-    st.caption("If all ✅, the LLM is live. The first ❌ is where it breaks. "
-               "Remove this block from app.py once confirmed.")
 
 
 # ============================================================
