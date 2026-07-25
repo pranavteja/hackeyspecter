@@ -548,7 +548,19 @@ tab_search, tab_concierge, tab_discover, tab_festival = st.tabs([
 # TAB 1: MOOD FIRST SEARCH
 # ============================================================
 with tab_search:
-    st.markdown('<div class="section-label">In your own words</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Try one of these, or type your own</div>', unsafe_allow_html=True)
+
+    # Sample buttons must be instantiated BEFORE the text_input so their
+    # callback can set `st.session_state["mood_input"]` before the text
+    # input widget is created (Streamlit forbids mutating a widget's
+    # session_state key after the widget is instantiated).
+    cols = st.columns(3)
+    for i, sample in enumerate(SAMPLE_PROMPTS[:6]):
+        with cols[i % 3]:
+            if st.button(sample, key=f"sample_{i}", use_container_width=True):
+                st.session_state["mood_input"] = sample
+                st.rerun()
+
     col1, col2 = st.columns([4, 1])
     with col1:
         prompt = st.text_input(
@@ -565,19 +577,10 @@ with tab_search:
             key="mood_media",
         )
 
-    sample_clicked = st.session_state.pop("active_sample", None)
-    cols = st.columns(3)
-    for i, sample in enumerate(SAMPLE_PROMPTS[:6]):
-        with cols[i % 3]:
-            if st.button(sample, key=f"sample_{i}", use_container_width=True):
-                st.session_state["active_sample"] = sample
-                st.rerun()
+    # Clean up the legacy one-shot key if it was set by an older version.
+    st.session_state.pop("active_sample", None)
 
-    # the active prompt is either what the user typed, or the last
-    # sample they clicked. The text_input shows the active value
-    # when it's non-empty, but we don't try to mutate the widget
-    # (Streamlit forbids that).
-    active_prompt = prompt or sample_clicked or ""
+    active_prompt = (prompt or "").strip()
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
