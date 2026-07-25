@@ -12,6 +12,7 @@ env/
 .ruff_cache/
 .coverage
 .env
+*.features-cache.json
 htmlcov/
 dist/
 build/

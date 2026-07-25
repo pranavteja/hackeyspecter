@@ -11,7 +11,10 @@ from __future__ import annotations
 import random
 import logging
 import hashlib
+import html
 from pathlib import Path
+from typing import Callable, TypeVar
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -19,25 +22,96 @@ import mood_engine as M
 from data.content import SAMPLE_PROMPTS
 from audio_utils import generate_summary_audio, is_playable_audio_url, transcribe_voice_input
 from recommend_and_pitch import generate_final_recommendation
-from search_engine import StoryDatabase, load_database, vector_search
+from search_engine import StoryDatabase, canonicalize_query, load_database, vector_search
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logger = logging.getLogger(__name__)
 
 VECTOR_STORE_PATH = Path(__file__).resolve().with_name("stories_vector_store.npz")
+MAX_SESSION_SEARCH_CACHE_ENTRIES = 20
+T = TypeVar("T")
+_loaded_vector_store_signature: str | None = None
+
+
+def _vector_store_signature() -> str:
+    if not VECTOR_STORE_PATH.exists():
+        return "missing"
+    stat = VECTOR_STORE_PATH.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
 @st.cache_resource(show_spinner=False)
-def get_story_database() -> StoryDatabase:
+def get_story_database(path: str, signature: str) -> StoryDatabase:
     """Load the offline-built vector store; never rebuild embeddings during app use."""
-    if not VECTOR_STORE_PATH.exists():
+    vector_path = Path(path)
+    if not vector_path.exists():
         raise FileNotFoundError(
             "The offline vector store is missing. Run process_and_embed_dataset "
             "once to create stories_vector_store.npz."
         )
-    return load_database(str(VECTOR_STORE_PATH))
+    return load_database(str(vector_path))
+
+
+def get_active_story_database() -> StoryDatabase:
+    """Refresh the cached database automatically when the offline store is replaced."""
+    global _loaded_vector_store_signature
+    signature = _vector_store_signature()
+    if _loaded_vector_store_signature not in (None, signature):
+        # Avoid retaining an old full matrix after repeated offline rebuilds.
+        get_story_database.clear()
+    _loaded_vector_store_signature = signature
+    return get_story_database(str(VECTOR_STORE_PATH), signature)
+
+
+def _story_cache_key(database: StoryDatabase, search_request: str, namespace: str) -> str:
+    """Build a privacy-preserving, whitespace-stable key for session-only caches."""
+    material = f"{namespace}\0{database.build_fingerprint}\0{canonicalize_query(search_request)}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _session_cache_get_or_set(cache_name: str, cache_key: str, factory: Callable[[], T]) -> T:
+    """Use a small LRU-like session cache without retaining unlimited user prompts."""
+    cache = st.session_state.setdefault(cache_name, {})
+    if cache_key in cache:
+        value = cache.pop(cache_key)
+        cache[cache_key] = value
+        return value
+    value = factory()
+    cache[cache_key] = value
+    while len(cache) > MAX_SESSION_SEARCH_CACHE_ENTRIES:
+        cache.pop(next(iter(cache)))
+    return value
+
+
+def run_story_retrieval(search_request: str) -> list[dict]:
+    """Run only the fast retrieval stage; a GPT pitch is intentionally separate."""
+    database = get_active_story_database()
+    cache_key = _story_cache_key(database, search_request, "retrieval")
+    return _session_cache_get_or_set(
+        "rag_retrieval_cache",
+        cache_key,
+        lambda: vector_search(search_request, database, top_k=5),
+    )
+
+
+def run_story_rerank(search_request: str, candidates: list[dict]) -> dict:
+    """Generate a cached optional pitch after instant vector results are visible."""
+    database = get_active_story_database()
+    candidate_signature = ";".join(
+        f"{item.get('record_id', '')}:{float(item.get('vector_similarity', 0.0)):.6f}"
+        for item in candidates
+    )
+    cache_key = hashlib.sha256(
+        f"{_story_cache_key(database, search_request, 'rerank')}\0{candidate_signature}".encode("utf-8")
+    ).hexdigest()
+    return _session_cache_get_or_set(
+        "rag_rerank_cache",
+        cache_key,
+        lambda: generate_final_recommendation(search_request, candidates),
+    )
 
 # ============================================================
 # PAGE CONFIG
@@ -334,17 +408,54 @@ if "festival" not in st.session_state:
 # ============================================================
 # HELPERS
 # ============================================================
+def _set_mood_sample(sample: str) -> None:
+    """Run before widgets are instantiated so Streamlit can safely update the input."""
+    st.session_state["mood_input"] = sample
+
+
+def _set_weekend_sample() -> None:
+    st.session_state["weekend_input"] = random.choice(SAMPLE_PROMPTS)
+
+
+def _set_random_festival_template(choices: list[str]) -> None:
+    current = st.session_state.get("fest_template_select_widget")
+    alternatives = [choice for choice in choices if choice != current]
+    st.session_state["fest_template_select_widget"] = random.choice(alternatives or choices)
+
+
+def _set_discover_seed(item_id: str) -> None:
+    st.session_state["discover_seed_select"] = item_id
+
+
+def _safe_text(value: object) -> str:
+    """Escape dynamic text before it is placed in unsafe_allow_html markup."""
+    return html.escape(str(value), quote=True)
+
+
+def _is_safe_http_url(value: object) -> bool:
+    parsed = urlparse(str(value).strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _show_operation_error(action: str, exc: Exception) -> None:
+    """Keep implementation details in logs while showing users a stable recovery path."""
+    logger.exception("%s failed", action, exc_info=exc)
+    st.error(f"{action} could not run. Please check your connection and try again.")
+
+
 def render_card(item: dict, score: float | None = None) -> str:
-    score_html = f'<span style="color:var(--ink-dim); font-size:0.8rem;"> · {score:.2f} match</span>' if score is not None else ""
+    raw_type = str(item.get("type", "book"))
+    safe_type = raw_type if raw_type in {"movie", "book", "podcast", "game", "music"} else "book"
+    score_html = f'<span style="color:var(--ink-dim); font-size:0.8rem;"> · {float(score):.2f} match</span>' if score is not None else ""
     themes_html = ""
     if item.get("themes"):
-        themes_html = f'<div class="themes">{" · ".join(item["themes"][:5])}</div>'
+        themes_html = f'<div class="themes">{" · ".join(_safe_text(theme) for theme in item["themes"][:5])}</div>'
     return f"""
     <div class="card">
-      <div class="type-chip {item['type']}">{M.media_type_emoji(item['type'])} {item['type']}</div>
-      <h3>{item['title']}{score_html}</h3>
-      <div class="creator">{item['creator']} · {item['year']}</div>
-      <div class="pitch">{item.get('pitch', '')}</div>
+      <div class="type-chip {safe_type}">{_safe_text(M.media_type_emoji(safe_type))} {_safe_text(raw_type)}</div>
+      <h3>{_safe_text(item.get('title', 'Untitled'))}{score_html}</h3>
+      <div class="creator">{_safe_text(item.get('creator', 'Unknown'))} · {_safe_text(item.get('year', ''))}</div>
+      <div class="pitch">{_safe_text(item.get('pitch', ''))}</div>
       {themes_html}
     </div>
     """
@@ -352,14 +463,16 @@ def render_card(item: dict, score: float | None = None) -> str:
 
 def render_summary_card(item: dict, score: float) -> str:
     """Render a result from summary_1to16000.json without demo metadata."""
-    summary = item.get("summary", "").strip()
+    summary = str(item.get("summary", "")).strip()
     preview = summary[:700] + ("…" if len(summary) > 700 else "")
-    link = item.get("librivox_project_url", "")
-    link_html = f'<a href="{link}" target="_blank">Open on LibriVox</a>' if link else ""
+    title = _safe_text(item.get("title", "Untitled"))
+    link = str(item.get("librivox_project_url", ""))
+    safe_link = _safe_text(link) if _is_safe_http_url(link) else ""
+    link_html = f'<a href="{safe_link}" target="_blank" rel="noopener noreferrer">Open on LibriVox</a>' if safe_link else ""
     return f'''<div class="card">
       <div class="type-chip book">Story summary · {score:.2f} match</div>
-      <h3>{item.get("title", "Untitled")}</h3>
-      <div class="pitch">{preview}</div>
+      <h3>{title}</h3>
+      <div class="pitch">{_safe_text(preview)}</div>
       {link_html}
     </div>'''
 
@@ -368,7 +481,7 @@ def render_why(item: dict, target: dict) -> str:
     return f"""
     <div class="why-box">
       <strong style="font-style: normal; color: var(--accent);">Why you will love this:</strong><br>
-      {M.explain(item, target)}
+      {_safe_text(M.explain(item, target))}
     </div>
     """
 
@@ -442,19 +555,18 @@ with tab_search:
             key="mood_media",
         )
 
-    sample_clicked = st.session_state.pop("active_sample", None)
     cols = st.columns(3)
     for i, sample in enumerate(SAMPLE_PROMPTS[:6]):
         with cols[i % 3]:
-            if st.button(sample, key=f"sample_{i}", use_container_width=True):
-                st.session_state["active_sample"] = sample
-                st.rerun()
+            st.button(
+                sample,
+                key=f"sample_{i}",
+                use_container_width=True,
+                on_click=_set_mood_sample,
+                args=(sample,),
+            )
 
-    # the active prompt is either what the user typed, or the last
-    # sample they clicked. The text_input shows the active value
-    # when it's non-empty, but we don't try to mutate the widget
-    # (Streamlit forbids that).
-    active_prompt = prompt or sample_clicked or ""
+    active_prompt = prompt.strip()
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -481,7 +593,7 @@ with tab_search:
         }
         types = types_map[media_filter]
 
-        st.markdown(f"**You said:** *\"{active_prompt}\"*")
+        st.caption(f'You said: "{active_prompt}"')
         st.markdown(render_mood_summary(target), unsafe_allow_html=True)
         st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
@@ -502,12 +614,25 @@ with tab_search:
                                 st.session_state.finished.append(item["id"])
                             st.toast(f"Added **{item['title']}** to your finished shelf", icon="🕯️")
                     with c2:
-                        if st.button("🔗 See what else fits", key=f"goto_{item['id']}"):
-                            st.session_state["discover_seed"] = item["id"]
+                        if st.button(
+                            "🔗 See what else fits",
+                            key=f"goto_{item['id']}",
+                            on_click=_set_discover_seed,
+                            args=(item["id"],),
+                        ):
                             st.toast("Open the **Cross-Media Discovery** tab →", icon="🔗")
 
         # update history
         if results:
+            history_key = f"{active_prompt}\0{media_filter}\0{results[0][0]['id']}"
+            if st.session_state.get("last_mood_history_key") == history_key:
+                continue_history = False
+            else:
+                st.session_state["last_mood_history_key"] = history_key
+                continue_history = True
+        else:
+            continue_history = False
+        if continue_history:
             st.session_state.history.insert(0, (active_prompt, target, results[0][0]))
             st.session_state.history = st.session_state.history[:6]
 
@@ -524,16 +649,13 @@ with tab_concierge:
         key="weekend_input",
     )
 
-    weekend_sample = st.session_state.pop("active_weekend_sample", None)
     c1, c2, _ = st.columns([1, 1, 4])
     with c1:
         plan_clicked = st.button("Plan my weekend", type="primary", use_container_width=True)
     with c2:
-        if st.button("Try a sample", use_container_width=True):
-            st.session_state["active_weekend_sample"] = random.choice(SAMPLE_PROMPTS)
-            st.rerun()
+        st.button("Try a sample", use_container_width=True, on_click=_set_weekend_sample)
 
-    active_weekend_prompt = concierge_prompt or weekend_sample or ""
+    active_weekend_prompt = concierge_prompt.strip()
     if plan_clicked and active_weekend_prompt:
         target = M.parse_mood(active_weekend_prompt)
         itinerary = M.plan_weekend(target)
@@ -546,6 +668,8 @@ with tab_concierge:
         for entry in itinerary:
             if entry["item"]["id"] not in st.session_state.finished:
                 st.session_state.finished.append(entry["item"]["id"])
+    elif plan_clicked:
+        st.warning("Describe the kind of weekend you want before generating a plan.")
 
     if st.session_state.weekend:
         wk = st.session_state.weekend
@@ -553,7 +677,7 @@ with tab_concierge:
             f"""
             <div class="festival-hero" style="margin-top:1rem;">
               <h2>Your Weekend</h2>
-              <div class="tagline">Built around: "{wk['prompt']}"</div>
+              <div class="tagline">Built around: &quot;{_safe_text(wk['prompt'])}&quot;</div>
               <div style="margin-top:0.8rem;">{render_mood_summary(wk['mood'])}</div>
             </div>
             """,
@@ -564,11 +688,11 @@ with tab_concierge:
             st.markdown(
                 f"""
                 <div class="itinerary-slot">
-                  <div class="slot-emoji">{M.media_type_emoji(item['type'])}</div>
-                  <div class="slot-label">{entry['slot']}</div>
+                  <div class="slot-emoji">{_safe_text(M.media_type_emoji(item['type']))}</div>
+                  <div class="slot-label">{_safe_text(entry['slot'])}</div>
                   <div class="slot-item">
-                    <h4>{item['title']}</h4>
-                    <div class="meta">{item['creator']} · {item['year']} · {item['type']} · {entry['score']} match</div>
+                    <h4>{_safe_text(item['title'])}</h4>
+                    <div class="meta">{_safe_text(item['creator'])} · {_safe_text(item['year'])} · {_safe_text(item['type'])} · {_safe_text(entry['score'])} match</div>
                   </div>
                 </div>
                 """,
@@ -587,13 +711,13 @@ with tab_discover:
     finished_items_raw: list[dict | None] = [M.item_by_id(i) for i in st.session_state.finished]
     finished_items: list[dict] = [i for i in finished_items_raw if i is not None]
     first_id: str = finished_items[0]["id"] if finished_items else "m_eternal"
-    default_seed: str = st.session_state.get("discover_seed") or first_id
+    default_seed: str = st.session_state.get("discover_seed_select") or first_id
 
     # If user has a finished shelf, show a quick view of it
     if finished_items:
         st.markdown("**Your finished shelf:**")
         chips = "".join(
-            f'<span class="mood-pill">{M.media_type_emoji(i["type"])} {i["title"]}</span>'
+            f'<span class="mood-pill">{_safe_text(M.media_type_emoji(i["type"]))} {_safe_text(i["title"])}</span>'
             for i in finished_items[-8:]
         )
         st.markdown(chips, unsafe_allow_html=True)
@@ -623,10 +747,10 @@ with tab_discover:
         st.markdown(
             f"""
             <div class="festival-hero" style="margin-top:1rem;">
-              <div class="type-chip {seed['type']}" style="display:inline-block;">{M.media_type_emoji(seed['type'])} {seed['type']}</div>
-              <h2>{seed['title']}</h2>
-              <div class="tagline">{seed.get('pitch','')}</div>
-              <div class="window">{seed['emotional_arc']}</div>
+              <div class="type-chip {_safe_text(seed['type'])}" style="display:inline-block;">{_safe_text(M.media_type_emoji(seed['type']))} {_safe_text(seed['type'])}</div>
+              <h2>{_safe_text(seed['title'])}</h2>
+              <div class="tagline">{_safe_text(seed.get('pitch',''))}</div>
+              <div class="window">{_safe_text(seed['emotional_arc'])}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -640,7 +764,7 @@ with tab_discover:
             if r["shared_themes"]:
                 st.markdown(
                     f'<div style="margin-top:-0.5rem; margin-bottom:0.5rem;">'
-                    f'<span class="mood-pill" style="font-size:0.7rem;">shared themes: {", ".join(r["shared_themes"])}</span>'
+                    f'<span class="mood-pill" style="font-size:0.7rem;">shared themes: {_safe_text(", ".join(r["shared_themes"]))}</span>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
@@ -665,8 +789,8 @@ with tab_festival:
     with c2:
         fest_choices = [t["name"] for t in M.FESTIVAL_TEMPLATES]
         default_fest_idx = 0
-        if st.session_state.get("fest_template_select") in fest_choices:
-            default_fest_idx = fest_choices.index(st.session_state["fest_template_select"])
+        if st.session_state.get("fest_template_select_widget") in fest_choices:
+            default_fest_idx = fest_choices.index(st.session_state["fest_template_select_widget"])
         fest_choice = st.selectbox(
             "festival_template",
             options=fest_choices,
@@ -679,9 +803,12 @@ with tab_festival:
     with c1:
         gen_clicked = st.button("Generate this weekend's festival", type="primary", use_container_width=True)
     with c2:
-        if st.button("Surprise me", use_container_width=True):
-            st.session_state["fest_template_select"] = random.choice(fest_choices)
-            st.rerun()
+        st.button(
+            "Surprise me",
+            use_container_width=True,
+            on_click=_set_random_festival_template,
+            args=(fest_choices,),
+        )
 
     if gen_clicked:
         template = next(t for t in M.FESTIVAL_TEMPLATES if t["name"] == fest_choice)
@@ -694,8 +821,8 @@ with tab_festival:
             f"""
             <div class="festival-hero" style="margin-top:1rem;">
               <div class="window">Showing {f['starts']} → {f['ends']}</div>
-              <h2>{f['name']}</h2>
-              <div class="tagline">{f['tagline']}</div>
+              <h2>{_safe_text(f['name'])}</h2>
+              <div class="tagline">{_safe_text(f['tagline'])}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -714,66 +841,135 @@ with tab_festival:
 # ============================================================
 with tab_context:
     st.markdown('<div class="section-label">Semantic story search</div>', unsafe_allow_html=True)
-    st.caption("The story database is embedded offline once. This search embeds only your request, then reranks the closest saved vectors.")
-    story_request = st.text_input("story_search", placeholder="A hopeful story about rebuilding after a breakup", label_visibility="collapsed")
+    st.caption(
+        "Story vectors are built offline once. Search shows semantic matches as soon as your "
+        "query is embedded; the personalized GPT pitch is an optional second step."
+    )
     voice_recording = st.audio_input("🎙 Speak your story request")
     if voice_recording:
         voice_bytes = voice_recording.getvalue()
         recording_id = hashlib.sha256(voice_bytes).hexdigest()
         if recording_id != st.session_state.get("last_voice_recording_id"):
+            # Mark this recording before calling the API so a failed request is
+            # not retried on every unrelated Streamlit rerun.
+            st.session_state.last_voice_recording_id = recording_id
             try:
                 with st.spinner("You finished speaking — transcribing with OpenAI…"):
-                    st.session_state.voice_story_request = transcribe_voice_input(
+                    transcript = transcribe_voice_input(
                         voice_bytes,
                         voice_recording.name or "story-request.wav",
                         voice_recording.type or "audio/wav",
                     )
-                    st.session_state.last_voice_recording_id = recording_id
+                    st.session_state.voice_story_request = transcript
+                    # This code runs before the text widget is created, which is
+                    # the safe point to populate it during a Streamlit rerun.
+                    st.session_state["story_search_input"] = transcript
+                    st.session_state["pending_voice_search"] = True
+                    st.session_state.pop("failed_voice_recording_id", None)
             except Exception as exc:
-                st.error(f"Voice transcription could not run: {exc}")
+                st.session_state["failed_voice_recording_id"] = recording_id
+                _show_operation_error("Voice transcription", exc)
+
+    if st.session_state.get("failed_voice_recording_id") == st.session_state.get("last_voice_recording_id"):
+        st.caption("The current recording was not transcribed. You can retry it or record a new request.")
+        if st.button("Retry transcription", key="retry_voice_transcription"):
+            st.session_state.pop("last_voice_recording_id", None)
+            st.session_state.pop("failed_voice_recording_id", None)
+            st.rerun()
 
     voice_story_request = st.session_state.get("voice_story_request", "")
     if voice_story_request:
-        st.caption(f"Voice input: “{voice_story_request}”")
+        voice_caption, clear_voice = st.columns([5, 1])
+        with voice_caption:
+            st.caption(f"Voice input: “{voice_story_request}”")
+        with clear_voice:
+            if st.button("Clear voice", key="clear_voice_story_request"):
+                st.session_state.pop("voice_story_request", None)
+                st.rerun()
+    # A form prevents Streamlit from rerunning the whole page on every keystroke.
+    with st.form("story_search_form"):
+        story_request = st.text_input(
+            "story_search",
+            placeholder="A hopeful story about rebuilding after a breakup",
+            label_visibility="collapsed",
+            key="story_search_input",
+        )
+        search_submitted = st.form_submit_button("Search stories", type="primary", use_container_width=True)
+
+    auto_search_requested = bool(st.session_state.pop("pending_voice_search", False))
     search_request = story_request.strip() or voice_story_request
-    if st.button("Search with AI", type="primary"):
-        try:
-            with st.spinner("Embedding your request, searching saved vectors, and choosing the best match…"):
-                candidates = vector_search(search_request, get_story_database(), top_k=5)
-                recommendation = generate_final_recommendation(search_request, candidates)
-                st.session_state.story_search = (recommendation, candidates)
-                st.session_state.pop("recommendation_audio", None)
-        except Exception as exc:
-            st.error(f"Search could not run: {exc}")
+    if search_submitted or auto_search_requested:
+        if not search_request.strip():
+            st.warning("Enter a story, mood, or theme before searching.")
+        else:
+            try:
+            # This critical path makes one query-embedding request, then exact
+            # local NumPy ranking. GPT reranking is deliberately deferred.
+                with st.spinner("Finding the closest semantic story matches..."):
+                    candidates = run_story_retrieval(search_request)
+                    st.session_state.story_search = {
+                        "query": search_request,
+                        "candidates": candidates,
+                        "recommendation": None,
+                        "rerank_state": "pending",
+                    }
+                    st.session_state.pop("recommendation_audio", None)
+                    if auto_search_requested or (not story_request.strip() and voice_story_request):
+                        # Do not let a completed recording silently become the next
+                        # blank search query. The recorder hash still prevents it
+                        # from being transcribed again on the following rerun.
+                        st.session_state.pop("voice_story_request", None)
+            except Exception as exc:
+                _show_operation_error("Story search", exc)
 
     saved_search = st.session_state.get("story_search")
+    # Discard session data produced by the previous one-step search implementation.
+    if saved_search and not isinstance(saved_search, dict):
+        st.session_state.pop("story_search", None)
+        saved_search = None
     if saved_search:
-        recommendation, results = saved_search
-        st.markdown(f"### Recommended: {recommendation['recommended_book_title']}")
-        st.markdown(recommendation["pitch_script"])
-        if recommendation["emotional_match_reasons"]:
-            st.markdown("**Why it fits:** " + " · ".join(recommendation["emotional_match_reasons"]))
-        if recommendation["audio_url"]:
-            st.markdown(f"[Listen on LibriVox]({recommendation['audio_url']})")
+        results = saved_search.get("candidates", [])
+        recommendation = saved_search.get("recommendation")
+        if not isinstance(results, list):
+            results = []
+        if not results:
+            st.info("No stored story summaries matched those keywords. Try a different description.")
+        else:
+            recommended_story = results[0]
+            if isinstance(recommendation, dict):
+                recommended_story = next(
+                    (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
+                    results[0],
+                )
+                st.subheader(f"Recommended: {recommendation.get('recommended_book_title', 'Untitled')}")
+                st.markdown(str(recommendation.get("pitch_script", "")))
+                reasons = recommendation.get("emotional_match_reasons", [])
+                if isinstance(reasons, list) and reasons:
+                    st.markdown("**Why it fits:** " + " · ".join(str(reason) for reason in reasons))
+            else:
+                st.subheader(f"Best semantic match: {recommended_story.get('title', 'Untitled')}")
+                st.caption(
+                    "These results are ready from the saved vector index. Personalizing the final "
+                    "recommendation with your exact mood…"
+                )
 
-        recommended_story = next(
-            (item for item in results if item.get("title") == recommendation["recommended_book_title"]),
-            None,
-        )
-        if recommended_story:
-            source_audio_url = recommendation.get("audio_url", "")
+            # Always derive audio metadata from the selected stored story, never from model text.
+            source_audio_url = str(recommended_story.get("audio_url") or "")
+            project_url = str(recommended_story.get("librivox_project_url") or "")
+            if _is_safe_http_url(project_url):
+                st.link_button("Open on LibriVox", project_url)
             if is_playable_audio_url(source_audio_url):
-                if st.button("▶ Play recommendation", key="play_recommendation_source"):
+                if st.button("Play recommendation", key="play_recommendation_source"):
                     st.session_state.recommendation_audio = ("source", source_audio_url)
-            elif st.button("▶ Play story summary with OpenAI", key="play_recommendation_summary"):
+            elif st.button("Play story summary with OpenAI", key="play_recommendation_summary"):
                 try:
-                    with st.spinner("Creating summary audio…"):
+                    with st.spinner("Creating summary audio..."):
                         st.session_state.recommendation_audio = (
                             "tts",
                             generate_summary_audio(recommended_story),
                         )
                 except Exception as exc:
-                    st.error(f"Audio could not be created: {exc}")
+                    _show_operation_error("Summary audio", exc)
 
             saved_audio = st.session_state.get("recommendation_audio")
             if saved_audio:
@@ -789,6 +985,26 @@ with tab_context:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+            if recommendation is None and saved_search.get("rerank_state", "pending") == "pending":
+                try:
+                    # This second spinner is intentionally independent from
+                    # retrieval: the semantic cards above remain visible while
+                    # the model writes the final personalized pitch.
+                    with st.spinner("Writing your personalized recommendation..."):
+                        saved_search["recommendation"] = run_story_rerank(
+                            str(saved_search.get("query", "")),
+                            results,
+                        )
+                        saved_search["rerank_state"] = "complete"
+                        st.session_state.story_search = saved_search
+                        st.session_state.pop("recommendation_audio", None)
+                    st.rerun()
+                except Exception as exc:
+                    saved_search["rerank_state"] = "failed"
+                    st.session_state.story_search = saved_search
+                    _show_operation_error("Personalized pitch", exc)
+            elif recommendation is None and saved_search.get("rerank_state") == "failed":
+                st.warning("The semantic matches are available, but the personalized pitch could not be generated.")
         else:
             st.info("No stored story summaries matched those keywords. Try a different description.")
 
