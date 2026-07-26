@@ -1,5 +1,5 @@
 """
-Hackey Specter — main Streamlit app.
+Moodio — main Streamlit app.
 
 A 6-hour hackathon prototype that recommends entertainment based on mood,
 plans weekend itineraries across media, and links stories across formats.
@@ -147,7 +147,7 @@ def run_story_rerank(search_request: str, candidates: list[dict]) -> dict:
 # PAGE CONFIG
 # ============================================================
 st.set_page_config(
-    page_title="Hackey Specter",
+    page_title="Moodio",
     page_icon="🕯️",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -662,7 +662,7 @@ def render_mood_summary(target: dict) -> str:
 st.markdown(
     """
     <div style="padding: 1.5rem 0 1rem 0;">
-      <h1 class="hero-title">Hackey <span class="accent">Specter</span></h1>
+      <h1 class="hero-title">Mood<span class="accent">io</span></h1>
       <p class="hero-sub">
         Tell us how you want to feel. We'll find the movie, book, podcast, or game that gets you there —
         and explain why it'll be the one that stays with you.
@@ -1077,7 +1077,7 @@ st.markdown(
     """
     <div class="divider"></div>
     <div style="text-align:center; color:var(--ink-dim); font-size:0.85rem; padding:1rem 0 2rem 0;">
-      Hackey Specter · built in 6 hours · mood-first entertainment discovery
+      Moodio · mood-first storytelling discovery
     </div>
     """,
     unsafe_allow_html=True,

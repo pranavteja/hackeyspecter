@@ -1,4 +1,4 @@
-# Databricks Apps deployment
+# Moodio on Databricks Apps
 
 This app is configured to deploy on **Databricks Apps** with the included
 `app.yaml` manifest.
@@ -19,7 +19,7 @@ This app is configured to deploy on **Databricks Apps** with the included
 
 ```bash
 # from the project root
-databricks apps deploy hackey-specter --source .
+databricks apps deploy moodio --source .
 ```
 
 ### Option B — Databricks UI

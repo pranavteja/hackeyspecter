@@ -1,4 +1,4 @@
-"""Hackey Specter mood engine."""
+"""Moodio mood engine."""
 from .engine import (
     parse_mood,
     rank,

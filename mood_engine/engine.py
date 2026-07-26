@@ -1,5 +1,5 @@
 """
-Local mood engine for Hackey Specter.
+Local mood engine for Moodio.
 
 Replaces an LLM with a deterministic, fast, rule-based pipeline:
   1. parse free text -> target mood vector

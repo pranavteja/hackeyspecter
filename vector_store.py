@@ -21,7 +21,7 @@ def materialize_vector_store(source_path: str) -> Path:
         return source
 
     digest = hashlib.sha256(source_path.encode("utf-8")).hexdigest()[:16]
-    destination = Path(gettempdir()) / f"hackeyspecter-vector-store-{digest}.npz"
+    destination = Path(gettempdir()) / f"moodio-vector-store-{digest}.npz"
     if destination.is_file() and destination.stat().st_size > 0:
         return destination
 

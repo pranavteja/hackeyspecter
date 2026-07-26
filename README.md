@@ -1,135 +1,47 @@
-# Hackey Specter 🕯️
+# Moodio
 
+## Mood First Search for Pocket FM
 
-python -c "from preprocess_stories import import_precomputed_embeddings; import_precomputed_embeddings(r'C:\Users\sumit\Downloads\ultimate_pocketfm_master_dataset_with_embeddings.json', 'ultimate_pocketfm_vector_store.npz')"
+Moodio turns vague emotional intent into story discovery for Pocket FM's curated storytelling catalog. Instead of asking people to choose a genre, it understands prompts such as “a rainy Sunday after heartbreak,” finds emotionally aligned stories, and explains why a title is likely to resonate.
 
-
-> Tell us how you want to feel. We'll find the movie, book, podcast, or game
-> that gets you there — and explain why it'll be the one that stays with you.
-
-A 6-hour hackathon prototype for mood-first entertainment discovery.
-Built in **Python + Streamlit**, deploys to **Databricks Apps** with no external API keys.
+![Moodio search and recommendation example](assets/moodio-search-example.png)
 
 ## What it does
 
-| Feature | What happens |
-|---|---|
-| **🔍 Mood First Search** | Type a feeling in plain language ("a rainy Sunday after heartbreak"), get 5 ranked picks across media. |
-| **🎯 AI Entertainment Concierge** | Get a 7-slot weekend plan (Fri-night → Sun-night) spanning movies, books, games, and podcasts. |
-| **🔗 Cross-Media Discovery** | Finished a movie? Get 6 emotional cousins — books, games, and podcasts with the same fingerprint. |
-| **💡 Explain Why I Will Love This** | Every pick comes with a generated explanation of which emotional axes line up with your mood. |
-| **🎬 AI Curated Festivals** | 5 ready-to-go festival templates (Lonely Sundays, Wonder Engine, Big Hug, Knife-Edge, Late-Night Longing) that auto-build a 5-item lineup from the catalog. |
-| **🔎 AI Story Search** | Embeds a natural-language request once, shows saved semantic matches first, then automatically generates a personalized GPT pitch. |
+- Searches 40K+ curated stories using semantic vectors and mood-aware ranking.
+- Gives a personalized recommendation and explains the emotional fit.
+- Supports typed and voice story requests, plus optional generated audio summaries.
+- Provides weekend and festival discovery flows for broader mood-led exploration.
+- Captures out-of-catalog moods as demand signals—helping Pocket FM identify stories to produce, acquire, or promote next.
 
-## Architecture
+## How it works
 
-```
-hackeyspecter/
-├── app.py                 # Streamlit UI — single page, 5 tabs
-├── mood_engine/           # the "AI" — local, deterministic, LLM-swappable
-│   ├── engine.py          #   parse_mood, rank, explain, plan_weekend,
-│   │                      #   unlock_related, generate_festival
-│   ├── check_intent.py    #   OpenAI intent extraction + local story-summary search
-│   └── __init__.py
-├── data/
-│   └── content.py         # curated 42-item library + mood keyword map
-├── requirements.txt
-├── app.yaml               # Databricks Apps deployment config
-└── README.md
-```
+1. Describe how you want to feel in everyday language.
+2. Moodio embeds the request and retrieves the closest stories from its prebuilt vector index.
+3. It presents the closest semantic matches, then personalizes a recommendation from those candidates.
 
-**The "AI"** is a deterministic local engine — no API key needed.
-Each piece of content is tagged with a 12-dimensional mood vector
-(`valence, energy, warmth, tension, depth, romance, mystery, nostalgia, hope, melancholy, wonder, humor`).
-Free-text prompts are tokenized and matched against a curated keyword map
-that adjusts those axes; results are ranked by cosine similarity.
-The "explain why" generator reads the alignment between your target mood
-and each pick's mood vector and composes a paragraph from the strongest
-matching axes plus the item's themes and emotional arc.
-
-The architecture is **LLM-swappable**: each function takes a string
-or mood vector and returns a dict. Drop in an OpenAI/Anthropic call
-later and you keep the UI.
-
-### AI story-search contract
-
-The live story search has two deliberately separate stages. `vector_search()`
-embeds only the user's query, performs exact NumPy cosine ranking against the
-saved story vectors, and returns the closest five records first.
-`generate_final_recommendation()` then automatically reranks those five
-candidates while the UI shows a dedicated personalization loader, and returns
-`recommended_record_id`, `recommended_book_title`, `audio_url`,
-`pitch_script`, and `emotional_match_reasons`. Set `OPENAI_API_KEY` in `.env`
-or the deployment environment before use.
-
-### RAG data lifecycle
-
-Run `import_precomputed_embeddings(
-"C:/Users/sumit/Downloads/ultimate_pocketfm_master_dataset_with_embeddings.json",
-"ultimate_pocketfm_vector_store.npz")` once whenever the supplied master JSON
-changes. It streams the dataset, reuses its existing 3,072-dimensional
-`embedding` field, normalizes the matrix, and creates the saved NumPy store;
-it does not make corpus feature-extraction or embedding API calls. The running
-app never rereads the full JSON file: it loads
-`ultimate_pocketfm_vector_store.npz`, embeds only the user's query with the
-matching `text-embedding-3-large` model, and performs NumPy cosine search. The
-top five matches render before the automatic reranker is asked to write a
-pitch. Keep the source JSON and generated NPZ out of Git; use artifact storage
-for deployment.
-
-For Databricks Apps, upload `ultimate_pocketfm_vector_store.npz` to a Unity
-Catalog volume, add that volume to the app as a **Can read** resource with the
-key `story_vectors`, and deploy this configuration. The app receives the volume
-path through `RAG_VECTOR_STORE_VOLUME` and loads
-`/Volumes/<catalog>/<schema>/<volume>/ultimate_pocketfm_vector_store.npz`.
-
-The default quality profile uses `gpt-5.6-terra` with low reasoning for live
-reranking and `text-embedding-3-large` at 3072 dimensions for the one query
-embedding. `process_and_embed_dataset()` remains available only for a source
-dataset that has no precomputed vectors. The precomputed importer fast-paths an
-unchanged source file without rereading it.
+The catalog is embedded offline with `text-embedding-3-large` at 3,072 dimensions. At search time, only the user's request is embedded.
 
 ## Run locally
 
 ```bash
-# with uv (recommended)
-uv venv .venv
-uv pip install --python .venv/bin/python -r requirements.txt
-.venv/bin/streamlit run app.py
-
-# or with plain python
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/streamlit run app.py
 ```
 
-Then open <http://127.0.0.1:8501>.
+The app expects `ultimate_pocketfm_vector_store.npz` in the repository root, or a full path in `RAG_VECTOR_STORE_PATH`.
 
 ## Deploy to Databricks Apps
 
-The included `app.yaml` is the Databricks Apps spec — it runs Streamlit
-on port 8000, the port Databricks Apps expects.
+Keep the 449 MB vector-store file out of Git. Upload it to a Unity Catalog volume, grant the App service principal `USE CATALOG`, `USE SCHEMA`, and `READ VOLUME`, then deploy:
 
 ```bash
-databricks apps deploy hackey-specter --source .
+databricks apps deploy moodio --source .
 ```
 
-(or use the Databricks UI → **Apps** → **Create app** → point at this folder.)
+The app downloads the NPZ from the volume using the Databricks Files API and caches a local copy for the running App process. Configure `OPENAI_API_KEY` as a Databricks App secret before deploying.
 
-## Tech choices (and why)
+## Stack
 
-| Choice | Why |
-|---|---|
-| **Streamlit** | Fastest path from idea to demo'd web app in Python. |
-| **Local mood engine** | No API key required for the demo. Whole 42-item library ranks in <50ms. |
-| **12-dim mood vector** | Captures nuance that single-tag genre/keyword can't. Cosine similarity gives meaningful rankings. |
-| **4 tabs, not 4 pages** | Keeps the demo flow in one URL — easier to show, easier to deploy. |
-| **Curated 42-item library** | Quality over quantity for the demo. Every item has a real pitch and emotional arc. |
-
-## Stretch ideas (if there's more time)
-
-- Real LLM behind the mood parser for open-ended vocabulary
-- User accounts, watch-history, like/dislike signals
-- Spotify / TMDB / OpenLibrary API integration for the catalog
-- Vector DB (chroma/qdrant) for embedding-based retrieval
-- Festival sharing — generate a link someone else can open
+Python · Streamlit · OpenAI embeddings and Responses API · NumPy · Databricks Apps · Unity Catalog volumes
