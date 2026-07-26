@@ -543,7 +543,9 @@ def render_env_status() -> None:
                 st.markdown(f"- `{k}` ({len(v)} chars)")
 
 
-render_env_status()
+# Keep the environment diagnostic available for local troubleshooting, but do
+# not render it in the production UI.
+# render_env_status()
 
 
 def render_card(item: dict, score: float | None = None) -> str:
@@ -843,10 +845,6 @@ with tab_festival:
 # ============================================================
 with tab_mood:
     st.markdown('<div class="section-label">Semantic story search</div>', unsafe_allow_html=True)
-    st.caption(
-        "Story vectors are built offline once. Search shows semantic matches as soon as your "
-        "query is embedded; the personalized GPT pitch is an optional second step."
-    )
     voice_recording = st.audio_input("🎙 Speak your story request")
     if voice_recording:
         voice_bytes = voice_recording.getvalue()
@@ -872,7 +870,11 @@ with tab_mood:
                 st.session_state["failed_voice_recording_id"] = recording_id
                 _show_operation_error("Voice transcription", exc)
 
-    if st.session_state.get("failed_voice_recording_id") == st.session_state.get("last_voice_recording_id"):
+    last_voice_recording_id = st.session_state.get("last_voice_recording_id")
+    if (
+        last_voice_recording_id
+        and st.session_state.get("failed_voice_recording_id") == last_voice_recording_id
+    ):
         st.caption("The current recording was not transcribed. You can retry it or record a new request.")
         if st.button("Retry transcription", key="retry_voice_transcription"):
             st.session_state.pop("last_voice_recording_id", None)
