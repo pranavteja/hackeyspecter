@@ -1,0 +1,63 @@
+# Databricks Apps manifest for the Moodio Streamlit app.
+#
+# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime
+#
+# Two key facts from the runtime spec:
+#   1. `command` is a sequence (NOT a shell string). The only env-var
+#      expansion performed inside it is `$DATABRICKS_APP_PORT`, which the
+#      Databricks runtime substitutes with the actual listening port
+#      before executing the command.
+#   2. `env` is a list of {name, value} pairs. Env vars defined here are
+#      passed straight to the app process. Streamlit reads many of its
+#      config keys from env vars (STREAMLIT_SERVER_PORT, etc.).
+
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port=$DATABRICKS_APP_PORT
+  - --server.address=0.0.0.0
+  - --server.headless=true
+  # On Databricks: $DATABRICKS_APP_PORT is replaced with the real port.
+  # Locally:  you must set DATABRICKS_APP_PORT=8000 in your shell,
+  #           then `streamlit run app.py --server.port=$DATABRICKS_APP_PORT ...`
+
+env:
+  # ---- Streamlit config (also read from env when CLI flags are absent) ----
+  - name: STREAMLIT_SERVER_ADDRESS
+    value: "0.0.0.0"
+  - name: STREAMLIT_SERVER_HEADLESS
+    value: "true"
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  - name: STREAMLIT_GATHER_USAGE_STATS
+    value: "false"
+  - name: STREAMLIT_THEME_BASE
+    value: "light"
+  - name: STREAMLIT_CLIENT_TOOLBAR_MODE
+    value: "minimal"
+  # ---- App-level secrets (injected as env vars by Databricks Apps runtime) ----
+  # `valueFrom` is the **resource key label** assigned when adding the secret
+  # as an App Resource (Apps UI → your app → Resources → + Add resource).
+  # It is NOT a scope/key path. The runtime substitutes the bound secret's
+  # value into the env var named above at startup.
+  - name: OPENAI_API_KEY
+    valueFrom: secret
+  # ---- Optional model overrides (defaults are defined in rag_config.py) ----
+  - name: RAG_FEATURE_MODEL
+    value: "gpt-4o-mini"
+  - name: RAG_RERANK_MODEL
+    value: "gpt-4o"
+  - name: RAG_EMBEDDING_MODEL
+    value: "text-embedding-3-large"
+  - name: RAG_TTS_MODEL
+    value: "gpt-4o-mini-tts"
+  # Explicit full path for this deployed workspace. This takes precedence over
+  # the volume-resource directory below when the platform does not inject it.
+  - name: RAG_VECTOR_STORE_PATH
+    value: "/Volumes/workspace/default/hack-data/ultimate_pocketfm_vector_store.npz"
+  # Add a read-only Unity Catalog volume resource with this key in the
+  # Databricks Apps UI. The runtime resolves it to /Volumes/<catalog>/<schema>/<volume>.
+  # The app appends ultimate_pocketfm_vector_store.npz to this directory.
+  - name: RAG_VECTOR_STORE_VOLUME
+    valueFrom: story_vectors

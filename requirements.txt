@@ -1,0 +1,6 @@
+streamlit>=1.42.0
+streamlit-extras>=0.3.0
+watchdog>=4.0.0
+openai>=2.48.0
+numpy>=1.26.0
+databricks-sdk>=0.72.0
