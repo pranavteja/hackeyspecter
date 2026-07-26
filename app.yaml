@@ -52,6 +52,10 @@ env:
     value: "text-embedding-3-large"
   - name: RAG_TTS_MODEL
     value: "gpt-4o-mini-tts"
+  # Explicit full path for this deployed workspace. This takes precedence over
+  # the volume-resource directory below when the platform does not inject it.
+  - name: RAG_VECTOR_STORE_PATH
+    value: "/Volumes/workspace/default/hack-data/ultimate_pocketfm_vector_store.npz"
   # Add a read-only Unity Catalog volume resource with this key in the
   # Databricks Apps UI. The runtime resolves it to /Volumes/<catalog>/<schema>/<volume>.
   # The app appends ultimate_pocketfm_vector_store.npz to this directory.
