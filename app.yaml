@@ -37,12 +37,12 @@ env:
   - name: STREAMLIT_CLIENT_TOOLBAR_MODE
     value: "minimal"
   # ---- App-level secrets (injected as env vars by Databricks Apps runtime) ----
-  # Databricks Apps supports valueFrom in these forms (try in order):
-  #   1. "scope/key"      — e.g. "llm-secrets/openai-api-key"
-  #   2. "scope:key"      — e.g. "llm-secrets:openai-api-key"
-  #   3. "secret://scope/key" — explicit secret scheme
+  # `valueFrom` is the **resource key label** assigned when adding the secret
+  # as an App Resource (Apps UI → your app → Resources → + Add resource).
+  # It is NOT a scope/key path. The runtime substitutes the bound secret's
+  # value into the env var named above at startup.
   - name: OPENAI_API_KEY
-    valueFrom: "llm-secrets:openai-api-key"
+    valueFrom: openai-key
   # ---- Optional model overrides (defaults are defined in rag_config.py) ----
   - name: RAG_FEATURE_MODEL
     value: "gpt-4o-mini"
