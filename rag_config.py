@@ -111,14 +111,26 @@ def response_reasoning_options(model: str) -> dict[str, object]:
 
 
 def _diagnostic_missing_key_help() -> str:
-    """Return a checklist string explaining what to verify when the key is missing."""
+    """Return a checklist string explaining what to verify when the key is missing.
+
+    Also dumps every env var name + length so we can see what the runtime actually
+    exposes. Values are never included.
+    """
+    env_lines = [
+        f"  {k} ({len(v)} chars)"
+        for k, v in sorted(os.environ.items())
+    ]
+    env_block = "\n".join(env_lines) if env_lines else "  (no env vars visible)"
     return (
-        "OPENAI_API_KEY is not set. On Databricks Apps, verify:\n"
-        "  1. The secret exists in Databricks Secrets: scope=llm-secrets, key=openai-api-key\n"
-        "  2. The app's service principal has READ on that secret\n"
-        "  3. The secret is bound to OPENAI_API_KEY in the App's Resources UI\n"
-        "  4. The Databricks Apps deployment is current (push + redeploy after edits)\n"
-        "Locally: set OPENAI_API_KEY in your .env file."
+        "OPENAI_API_KEY is not set.\n"
+        "On Databricks Apps, verify:\n"
+        "  1. The secret is bound in App Resources UI\n"
+        "  2. The 'Resource key' label in the UI matches app.yaml valueFrom\n"
+        "  3. The deployment is current (push + redeploy after edits)\n"
+        "Locally: set OPENAI_API_KEY in your .env file.\n"
+        "\n"
+        "ALL env vars visible to the process (no values):\n"
+        f"{env_block}"
     )
 
 
