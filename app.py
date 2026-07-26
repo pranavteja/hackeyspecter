@@ -571,116 +571,12 @@ st.markdown(
 # ============================================================
 # TABS
 # ============================================================
-tab_search, tab_concierge, tab_discover, tab_festival, tab_context = st.tabs([
-    "🔍  Mood First Search",
+tab_concierge, tab_discover, tab_festival, tab_context = st.tabs([
     "🎯  Weekend Concierge",
     "🔗  Cross-Media Discovery",
     "🎬  Festivals",
     "🔎  AI Story Search",
 ])
-
-
-# ============================================================
-# TAB 1: MOOD FIRST SEARCH
-# ============================================================
-with tab_search:
-    st.markdown('<div class="section-label">In your own words</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        prompt = st.text_input(
-            "mood",
-            placeholder="I want something that feels like a rainy Sunday after heartbreak…",
-            label_visibility="collapsed",
-            key="mood_input",
-        )
-    with col2:
-        media_filter = st.selectbox(
-            "media",
-            ["everything", "movies", "books", "podcasts", "games"],
-            label_visibility="collapsed",
-            key="mood_media",
-        )
-
-    cols = st.columns(3)
-    for i, sample in enumerate(SAMPLE_PROMPTS[:6]):
-        with cols[i % 3]:
-            st.button(
-                sample,
-                key=f"sample_{i}",
-                use_container_width=True,
-                on_click=_set_mood_sample,
-                args=(sample,),
-            )
-
-    active_prompt = prompt.strip()
-
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-    if not active_prompt:
-        st.markdown(
-            """
-            <div style="text-align:center; padding:2rem 0 1rem 0; color:var(--ink-soft);">
-              <p style="font-family:'Fraunces',serif; font-style:italic; font-size:1.15rem; max-width:540px; margin: 0 auto 0.5rem auto;">
-                "I want something that feels like a rainy Sunday after heartbreak."
-              </p>
-              <p style="font-size:0.85rem; color:var(--ink-dim);">
-                Type a feeling, pick a sample above, and the mood engine will translate it into picks across movies, books, podcasts, and games.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if active_prompt:
-        target = M.parse_mood(active_prompt)
-        types_map = {
-            "everything": None, "movies": ["movie"], "books": ["book"],
-            "podcasts": ["podcast"], "games": ["game"],
-        }
-        types = types_map[media_filter]
-
-        st.caption(f'You said: "{active_prompt}"')
-        st.markdown(render_mood_summary(target), unsafe_allow_html=True)
-        st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
-
-        results = M.rank(target=target, k=5, types=types)
-        if not results:
-            st.warning("Nothing in the library for that yet — try a different feeling.")
-        else:
-            for idx, (item, score) in enumerate(results):
-                with st.container():
-                    st.markdown(render_card(item, score), unsafe_allow_html=True)
-                    # auto-expand the "why" for the top recommendation
-                    with st.expander("Why will I love this?", expanded=(idx == 0)):
-                        st.markdown(render_why(item, target), unsafe_allow_html=True)
-                    c1, c2, _ = st.columns([1, 1, 4])
-                    with c1:
-                        if st.button("🎬 I watched/finished this", key=f"finish_{item['id']}"):
-                            if item["id"] not in st.session_state.finished:
-                                st.session_state.finished.append(item["id"])
-                            st.toast(f"Added **{item['title']}** to your finished shelf", icon="🕯️")
-                    with c2:
-                        if st.button(
-                            "🔗 See what else fits",
-                            key=f"goto_{item['id']}",
-                            on_click=_set_discover_seed,
-                            args=(item["id"],),
-                        ):
-                            st.toast("Open the **Cross-Media Discovery** tab →", icon="🔗")
-
-        # update history
-        if results:
-            history_key = f"{active_prompt}\0{media_filter}\0{results[0][0]['id']}"
-            if st.session_state.get("last_mood_history_key") == history_key:
-                continue_history = False
-            else:
-                st.session_state["last_mood_history_key"] = history_key
-                continue_history = True
-        else:
-            continue_history = False
-        if continue_history:
-            st.session_state.history.insert(0, (active_prompt, target, results[0][0]))
-            st.session_state.history = st.session_state.history[:6]
 
 
 # ============================================================
