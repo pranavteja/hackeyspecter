@@ -623,6 +623,11 @@ def render_summary_card(item: dict, score: float) -> str:
     </div>'''
 
 
+def show_summary_card(item: dict, score: float) -> None:
+    """Render card markup without Markdown parsing its closing HTML tags."""
+    st.html(render_summary_card(item, score))
+
+
 def render_why(item: dict, target: dict) -> str:
     return f"""
     <div class="why-box">
@@ -720,10 +725,7 @@ with tab_concierge:
         if results:
             st.markdown(f"### Stories for your weekend")
             for item in results:
-                st.markdown(
-                    render_summary_card(item, item.get("vector_similarity", 0.0)),
-                    unsafe_allow_html=True,
-                )
+                show_summary_card(item, item.get("vector_similarity", 0.0))
                 rec_id = item.get("record_id", "")
                 if rec_id:
                     audio_key = f"audio_{rec_id}"
@@ -814,10 +816,7 @@ with tab_festival:
         if results:
             st.markdown(f"### Festival stories")
             for item in results:
-                st.markdown(
-                    render_summary_card(item, item.get("vector_similarity", 0.0)),
-                    unsafe_allow_html=True,
-                )
+                show_summary_card(item, item.get("vector_similarity", 0.0))
                 rec_id = item.get("record_id", "")
                 if rec_id:
                     audio_key = f"audio_{rec_id}"
@@ -1023,10 +1022,7 @@ with tab_mood:
         st.markdown("### Closest semantic matches")
         if results:
             for item in results:
-                st.markdown(
-                    render_summary_card(item, item.get("vector_similarity", 0.0)),
-                    unsafe_allow_html=True,
-                )
+                show_summary_card(item, item.get("vector_similarity", 0.0))
                 rec_id = item.get("record_id", "")
                 if rec_id:
                     audio_key = f"audio_{rec_id}"
