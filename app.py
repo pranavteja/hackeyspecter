@@ -214,35 +214,131 @@ h1, h2, h3, h4 {
 .card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 1.25rem 1.4rem;
-  margin-bottom: 1rem;
-  box-shadow: var(--shadow);
-  transition: transform 0.15s ease, background 0.15s ease;
+  border-radius: 18px;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 6px 24px rgba(80, 60, 40, 0.08);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  overflow: hidden;
 }
 .card:hover {
-  background: var(--bg-card-hover);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(80, 60, 40, 0.12);
+}
+.card-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.card-thumbnail {
+  position: relative;
+  flex: 0 0 170px;
+  min-height: 170px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--bg-soft), var(--border));
+}
+.card-thumbnail.movie { background: linear-gradient(135deg, #f3d5d5, #c9a0a0); }
+.card-thumbnail.book { background: linear-gradient(135deg, #f3e0c5, #d4b88c); }
+.card-thumbnail.podcast { background: linear-gradient(135deg, #cde7de, #8ab8aa); }
+.card-thumbnail.game { background: linear-gradient(135deg, #e4d9f2, #b8a7d1); }
+.card-thumbnail.music { background: linear-gradient(135deg, #e6d4e6, #c4a8c4); }
+.card-art {
+  font-size: 3.2rem;
+  opacity: 0.85;
+  filter: drop-shadow(0 2px 4px rgba(42,37,32,0.12));
+}
+.card-play {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 14px rgba(42,37,32,0.18);
+  border: 2px solid rgba(255,255,255,0.9);
+  font-size: 1.1rem;
+  line-height: 1;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+  cursor: pointer;
+}
+.card:hover .card-play {
+  transform: scale(1.08);
+  background: var(--accent);
+  color: #ffffff;
+}
+.card-body {
+  flex: 1 1 280px;
+  padding: 1.25rem 1.4rem;
+  min-width: 0;
 }
 .card .type-chip {
   display: inline-block;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  padding: 0.2rem 0.55rem;
+  padding: 0.22rem 0.6rem;
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--ink-soft);
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.7rem;
 }
 .card .type-chip.movie   { color: var(--accent); border-color: rgba(184,122,122,0.35); }
 .card .type-chip.book    { color: var(--accent-warm); border-color: rgba(184,128,64,0.35); }
 .card .type-chip.podcast { color: var(--accent-cool); border-color: rgba(90,138,122,0.35); }
 .card .type-chip.game    { color: #7b5fa6; border-color: rgba(123,95,166,0.30); }
-.card h3 { margin: 0 0 0.2rem 0; font-size: 1.35rem; }
-.card .creator { font-size: 0.85rem; color: var(--ink-dim); margin-bottom: 0.5rem; }
-.card .pitch { font-size: 0.95rem; color: var(--ink); line-height: 1.5; }
-.card .themes { margin-top: 0.5rem; font-size: 0.8rem; color: var(--ink-dim); }
+.card-title {
+  margin: 0 0 0.35rem 0;
+  font-size: 1.45rem;
+  line-height: 1.15;
+  color: var(--ink);
+  font-family: 'Fraunces', Georgia, serif;
+  font-weight: 500;
+}
+.card-score {
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+  font-weight: 400;
+  font-family: 'Inter', sans-serif;
+  margin-left: 0.4rem;
+}
+.card-creator {
+  font-size: 0.9rem;
+  color: var(--ink-dim);
+  margin-bottom: 0.75rem;
+}
+.card-pitch {
+  font-size: 0.96rem;
+  color: var(--ink-soft);
+  line-height: 1.55;
+}
+.card .themes {
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+@media (max-width: 640px) {
+  .card-thumbnail {
+    flex: 1 1 100%;
+    height: 180px;
+  }
+  .card-body {
+    flex: 1 1 100%;
+    padding: 1rem;
+  }
+  .card-play {
+    width: 54px;
+    height: 54px;
+    bottom: 14px;
+    right: 14px;
+    font-size: 1.25rem;
+  }
+}
 
 .why-box {
   background: linear-gradient(135deg, rgba(184,122,122,0.07), rgba(184,128,64,0.05));
@@ -492,17 +588,26 @@ render_env_status()
 def render_card(item: dict, score: float | None = None) -> str:
     raw_type = str(item.get("type", "book"))
     safe_type = raw_type if raw_type in {"movie", "book", "podcast", "game", "music"} else "book"
-    score_html = f'<span style="color:var(--ink-dim); font-size:0.8rem;"> · {float(score):.2f} match</span>' if score is not None else ""
+    emoji = _safe_text(M.media_type_emoji(safe_type))
+    score_html = f'<span class="card-score">{float(score):.2f} match</span>' if score is not None else ""
     themes_html = ""
     if item.get("themes"):
         themes_html = f'<div class="themes">{" · ".join(_safe_text(theme) for theme in item["themes"][:5])}</div>'
     return f"""
     <div class="card">
-      <div class="type-chip {safe_type}">{_safe_text(M.media_type_emoji(safe_type))} {_safe_text(raw_type)}</div>
-      <h3>{_safe_text(item.get('title', 'Untitled'))}{score_html}</h3>
-      <div class="creator">{_safe_text(item.get('creator', 'Unknown'))} · {_safe_text(item.get('year', ''))}</div>
-      <div class="pitch">{_safe_text(item.get('pitch', ''))}</div>
-      {themes_html}
+      <div class="card-inner">
+        <div class="card-thumbnail {safe_type}">
+          <span class="card-art">{emoji}</span>
+          <div class="card-play" aria-label="Play">▶</div>
+        </div>
+        <div class="card-body">
+          <div class="type-chip {safe_type}">{emoji} {_safe_text(raw_type)}</div>
+          <h3 class="card-title">{_safe_text(item.get('title', 'Untitled'))}{score_html}</h3>
+          <div class="card-creator">{_safe_text(item.get('creator', 'Unknown'))} · {_safe_text(item.get('year', ''))}</div>
+          <div class="card-pitch">{_safe_text(item.get('pitch', ''))}</div>
+          {themes_html}
+        </div>
+      </div>
     </div>
     """
 
@@ -515,11 +620,20 @@ def render_summary_card(item: dict, score: float) -> str:
     link = str(item.get("librivox_project_url", ""))
     safe_link = _safe_text(link) if _is_safe_http_url(link) else ""
     link_html = f'<a href="{safe_link}" target="_blank" rel="noopener noreferrer">Open on LibriVox</a>' if safe_link else ""
+    emoji = _safe_text(M.media_type_emoji("book"))
     return f'''<div class="card">
-      <div class="type-chip book">Story summary · {score:.2f} match</div>
-      <h3>{title}</h3>
-      <div class="pitch">{_safe_text(preview)}</div>
-      {link_html}
+      <div class="card-inner">
+        <div class="card-thumbnail book">
+          <span class="card-art">{emoji}</span>
+          <div class="card-play" aria-label="Play">▶</div>
+        </div>
+        <div class="card-body">
+          <div class="type-chip book">Story summary · {score:.2f} match</div>
+          <h3 class="card-title">{title}</h3>
+          <div class="card-pitch">{_safe_text(preview)}</div>
+          {link_html}
+        </div>
+      </div>
     </div>'''
 
 
