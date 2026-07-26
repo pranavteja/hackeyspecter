@@ -42,7 +42,7 @@ env:
   # It is NOT a scope/key path. The runtime substitutes the bound secret's
   # value into the env var named above at startup.
   - name: OPENAI_API_KEY
-    valueFrom: openai-key
+    valueFrom: openai_api_key
   # ---- Optional model overrides (defaults are defined in rag_config.py) ----
   - name: RAG_FEATURE_MODEL
     value: "gpt-4o-mini"
