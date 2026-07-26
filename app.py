@@ -479,6 +479,11 @@ def render_env_status() -> None:
                 st.markdown(f"- `{k}`: set ({len(v)} chars)")
         else:
             st.caption("(none)")
+        st.markdown("---")
+        with st.expander("All env var names (no values)", expanded=False):
+            for k in sorted(os.environ.keys()):
+                v = os.environ[k]
+                st.markdown(f"- `{k}` ({len(v)} chars)")
 
 
 render_env_status()

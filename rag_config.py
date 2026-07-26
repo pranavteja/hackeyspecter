@@ -116,16 +116,43 @@ def _diagnostic_missing_key_help() -> str:
         "OPENAI_API_KEY is not set. On Databricks Apps, verify:\n"
         "  1. The secret exists in Databricks Secrets: scope=llm-secrets, key=openai-api-key\n"
         "  2. The app's service principal has READ on that secret\n"
-        "  3. app.yaml references it via 'valueFrom: llm-secrets/openai-api-key'\n"
+        "  3. The secret is bound to OPENAI_API_KEY in the App's Resources UI\n"
         "  4. The Databricks Apps deployment is current (push + redeploy after edits)\n"
         "Locally: set OPENAI_API_KEY in your .env file."
     )
 
 
+def _discover_openai_key() -> str | None:
+    """Search the entire environment for an OpenAI key under any name.
+
+    Databricks Apps may inject the secret value under a different env var name
+    than OPENAI_API_KEY depending on how it was bound. We scan every env var
+    for a value that looks like an OpenAI key. First match wins.
+    """
+    # 1) Direct hit
+    val = os.environ.get("OPENAI_API_KEY")
+    if val and val.startswith("sk-"):
+        return val
+    # 2) Common alternate names
+    for name in ("OPENAI_KEY", "DATABRICKS_OPENAI_API_KEY", "LLM_OPENAI_API_KEY"):
+        val = os.environ.get(name)
+        if val and val.startswith("sk-"):
+            os.environ["OPENAI_API_KEY"] = val  # canonicalize for downstream
+            logger.info("Found OpenAI key under env var %s", name)
+            return val
+    # 3) Brute-force: any env var whose value starts with sk- (OpenAI key prefix)
+    for name, val in os.environ.items():
+        if val.startswith("sk-") and "OPENAI" in name.upper():
+            os.environ["OPENAI_API_KEY"] = val
+            logger.info("Found OpenAI key under env var %s", name)
+            return val
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_client() -> OpenAI:
     """Return one configured, retrying SDK client per application process."""
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _discover_openai_key()
     if not api_key:
         raise RuntimeError(_diagnostic_missing_key_help())
     return OpenAI(
