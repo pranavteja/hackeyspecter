@@ -67,14 +67,18 @@ def _vector_store_signature() -> str:
 def get_story_database(path: str, signature: str) -> StoryDatabase:
     """Load the offline-built vector store; never rebuild embeddings during app use."""
     vector_path = Path(path)
-    if not vector_path.exists():
+    try:
+        vector_path.stat()
+    except OSError as exc:
         raise FileNotFoundError(
-            "The offline vector store is missing at "
-            f"{vector_path}. RAG_VECTOR_STORE_VOLUME is "
+            "The offline vector store cannot be accessed at "
+            f"{vector_path}: {type(exc).__name__} [errno={exc.errno}] {exc.strerror}. "
+            "RAG_VECTOR_STORE_VOLUME is "
             f"{os.getenv('RAG_VECTOR_STORE_VOLUME', '<not set>')!r}. "
-            "Upload ultimate_pocketfm_vector_store.npz to that volume and verify "
-            "the app resource key is story_vectors."
-        )
+            "Verify the file path and the app service principal's UC volume grants."
+        ) from exc
+    if not vector_path.is_file():
+        raise FileNotFoundError(f"The vector store path is not a file: {vector_path}.")
     return load_database(str(vector_path))
 
 
