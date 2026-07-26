@@ -1,8 +1,6 @@
 """Efficient, safe audio helpers for recommendation playback and voice input."""
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 from functools import lru_cache
 from typing import Any
@@ -61,7 +59,10 @@ def _generate_tts_audio(script: str) -> bytes:
         input=script,
         response_format="mp3",
     )
-    return response.content
+    audio_content = getattr(response, "content", None)
+    if not isinstance(audio_content, (bytes, bytearray)) or not audio_content:
+        raise ValueError("TTS model returned invalid audio data.")
+    return bytes(audio_content)
 
 
 def generate_summary_audio(story: dict[str, Any]) -> bytes:

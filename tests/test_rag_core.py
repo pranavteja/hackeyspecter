@@ -189,12 +189,10 @@ class AudioTests(unittest.TestCase):
             summary_for_speech("not a record")  # type: ignore[arg-type]
 
     @patch("audio_utils.get_client")
-    def test_rejects_invalid_tts_base64(self, mock_client: object) -> None:
+    def test_rejects_empty_tts_audio_content(self, mock_client: object) -> None:
         _generate_tts_audio.cache_clear()
         audio_client = mock_client.return_value.with_options.return_value
-        audio_client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(audio=SimpleNamespace(data="not valid base64!")))]
-        )
+        audio_client.audio.speech.create.return_value = SimpleNamespace(content=b"")
         with self.assertRaisesRegex(ValueError, "invalid audio data"):
             _generate_tts_audio("A short story summary.")
 
