@@ -465,6 +465,20 @@ def render_env_status() -> None:
             "RAG_TRANSCRIPTION_MODEL",
         ):
             st.markdown(f"- `{var}`: `{os.environ.get(var, '<default>')}`")
+        # Surface any other env vars that look like API keys — catches cases
+        # where the Databricks runtime injected the secret under a different name.
+        st.markdown("---")
+        st.markdown("**Other env vars matching `OPENAI` or `API_KEY`:**")
+        matches = sorted(
+            k for k in os.environ.keys()
+            if ("OPENAI" in k.upper() or "API_KEY" in k.upper()) and k != "OPENAI_API_KEY"
+        )
+        if matches:
+            for k in matches:
+                v = os.environ[k]
+                st.markdown(f"- `{k}`: set ({len(v)} chars)")
+        else:
+            st.caption("(none)")
 
 
 render_env_status()
