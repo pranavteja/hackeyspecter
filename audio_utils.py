@@ -14,6 +14,7 @@ from rag_config import (
     TRANSCRIPTION_MODEL,
     get_client,
 )
+from story_display import story_summary_preview
 
 logger = logging.getLogger(__name__)
 TTS_VOICE = "alloy"
@@ -39,10 +40,13 @@ def summary_for_speech(story: dict[str, Any], max_characters: int = MAX_SUMMARY_
     if not isinstance(max_characters, int) or isinstance(max_characters, bool) or max_characters < 1:
         raise ValueError("max_characters must be a positive integer.")
     title = str(story.get("title", "This story")).strip() or "This story"
-    summary = str(story.get("summary", "")).strip()
+    summary = story_summary_preview(
+        story.get("summary", ""),
+        maximum_characters=max_characters,
+    )
     if not summary:
         raise ValueError("The recommended story has no summary available for audio playback.")
-    return f"{title}. {summary[:max_characters]}"
+    return f"{title}. {summary}"
 
 
 @lru_cache(maxsize=TTS_CACHE_SIZE)
