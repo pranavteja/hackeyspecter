@@ -527,11 +527,16 @@ def render_diagnostics_panel() -> None:
         st.markdown("---")
         st.markdown(f"**Recent errors ({n})**")
         if n == 0:
-            st.caption("No errors recorded yet.")
+            st.caption("No errors recorded yet. Trigger a search/voice action to populate.")
         else:
-            if st.button("Clear error log", key="diag_clear", use_container_width=True):
-                st.session_state["diagnostics_errors"] = []
-                st.rerun()
+            cols = st.columns(2)
+            with cols[0]:
+                if st.button("Clear error log", key="diag_clear", use_container_width=True):
+                    st.session_state["diagnostics_errors"] = []
+                    st.rerun()
+            with cols[1]:
+                if st.button("Refresh panel", key="diag_refresh", use_container_width=True):
+                    st.rerun()
             for i, entry in enumerate(reversed(errors), 1):
                 with st.container():
                     ts = time.strftime("%H:%M:%S", time.localtime(entry["ts"]))
@@ -541,14 +546,17 @@ def render_diagnostics_panel() -> None:
                     st.markdown(f"> {entry['message'][:300]}")
                     st.code(entry["traceback"], language="text")
 
-            # Single-click blob of the whole diagnostics state for easy paste
+            # Single text blob of the whole diagnostics state for easy paste.
+            # st.text_area is universally supported and works inside Databricks Apps'
+            # sandboxed iframe (download_button often isn't). Select all + copy.
+            st.markdown("**Full diagnostics blob (select all + copy):**")
             blob = _format_diagnostics_blob(errors)
-            st.download_button(
-                "📋 Copy full diagnostics (download .txt)",
-                data=blob,
-                file_name=f"diagnostics-{int(time.time())}.txt",
-                mime="text/plain",
-                use_container_width=True,
+            st.text_area(
+                "diagnostics",
+                value=blob,
+                height=min(600, 80 + 18 * blob.count("\n")),
+                label_visibility="collapsed",
+                key="diag_blob",
             )
 
 
