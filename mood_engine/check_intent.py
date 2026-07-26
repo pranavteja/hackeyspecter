@@ -117,7 +117,9 @@ def _parse_json_object(model_output: str) -> dict[str, Any]:
 def _vector_store_signature() -> str:
     if not VECTOR_STORE_PATH.is_file():
         raise FileNotFoundError(
-            "The offline vector store is missing. Run import_precomputed_embeddings first."
+            "The offline vector store is missing at "
+            f"{VECTOR_STORE_PATH}. RAG_VECTOR_STORE_VOLUME is "
+            f"{os.getenv('RAG_VECTOR_STORE_VOLUME', '<not set>')!r}."
         )
     stat = VECTOR_STORE_PATH.stat()
     return f"{stat.st_mtime_ns}:{stat.st_size}"

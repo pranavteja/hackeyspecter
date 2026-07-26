@@ -69,8 +69,11 @@ def get_story_database(path: str, signature: str) -> StoryDatabase:
     vector_path = Path(path)
     if not vector_path.exists():
         raise FileNotFoundError(
-            "The offline vector store is missing. Run import_precomputed_embeddings "
-            "once to create ultimate_pocketfm_vector_store.npz."
+            "The offline vector store is missing at "
+            f"{vector_path}. RAG_VECTOR_STORE_VOLUME is "
+            f"{os.getenv('RAG_VECTOR_STORE_VOLUME', '<not set>')!r}. "
+            "Upload ultimate_pocketfm_vector_store.npz to that volume and verify "
+            "the app resource key is story_vectors."
         )
     return load_database(str(vector_path))
 
