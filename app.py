@@ -498,10 +498,10 @@ if "history" not in st.session_state:
     st.session_state.history = []   # list of (text, parsed_mood, top_item)
 if "finished" not in st.session_state:
     st.session_state.finished = []  # list of item ids
-if "weekend" not in st.session_state:
-    st.session_state.weekend = None
-if "festival" not in st.session_state:
-    st.session_state.festival = None
+if "weekend_rag" not in st.session_state:
+    st.session_state.weekend_rag = None
+if "festival_rag" not in st.session_state:
+    st.session_state.festival_rag = None
 
 
 # ============================================================
@@ -514,16 +514,6 @@ def _set_mood_sample(sample: str) -> None:
 
 def _set_weekend_sample() -> None:
     st.session_state["weekend_input"] = random.choice(SAMPLE_PROMPTS)
-
-
-def _set_random_festival_template(choices: list[str]) -> None:
-    current = st.session_state.get("fest_template_select_widget")
-    alternatives = [choice for choice in choices if choice != current]
-    st.session_state["fest_template_select_widget"] = random.choice(alternatives or choices)
-
-
-def _set_discover_seed(item_id: str) -> None:
-    st.session_state["discover_seed_select"] = item_id
 
 
 def _safe_text(value: object) -> str:
@@ -685,11 +675,10 @@ st.markdown(
 # ============================================================
 # TABS
 # ============================================================
-tab_concierge, tab_discover, tab_festival, tab_context = st.tabs([
+tab_mood, tab_concierge, tab_festival = st.tabs([
+    "🔎  Tell us your mood",
     "🎯  Weekend Concierge",
-    "🔗  Cross-Media Discovery",
     "🎬  Festivals",
-    "🔎  AI Story Search",
 ])
 
 
@@ -713,189 +702,127 @@ with tab_concierge:
 
     active_weekend_prompt = concierge_prompt.strip()
     if plan_clicked and active_weekend_prompt:
-        target = M.parse_mood(active_weekend_prompt)
-        itinerary = M.plan_weekend(target)
-        st.session_state.weekend = {
-            "prompt": active_weekend_prompt,
-            "mood": target,
-            "itinerary": itinerary,
-        }
-        # remember finished items
-        for entry in itinerary:
-            if entry["item"]["id"] not in st.session_state.finished:
-                st.session_state.finished.append(entry["item"]["id"])
+        try:
+            logger.info("[RAG] weekend concierge search submitted: query=%r", active_weekend_prompt)
+            with st.spinner("Finding stories for your weekend..."):
+                candidates = run_story_retrieval(active_weekend_prompt)
+                st.session_state.weekend_rag = {
+                    "query": active_weekend_prompt,
+                    "candidates": candidates,
+                    "recommendation": None,
+                    "rerank_state": "pending",
+                }
+        except Exception as exc:
+            _show_operation_error("Weekend search", exc)
     elif plan_clicked:
         st.warning("Describe the kind of weekend you want before generating a plan.")
 
-    if st.session_state.weekend:
-        wk = st.session_state.weekend
-        st.markdown(
-            f"""
-            <div class="festival-hero" style="margin-top:1rem;">
-              <h2>Your Weekend</h2>
-              <div class="tagline">Built around: &quot;{_safe_text(wk['prompt'])}&quot;</div>
-              <div style="margin-top:0.8rem;">{render_mood_summary(wk['mood'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        for idx, entry in enumerate(wk["itinerary"]):
-            item = entry["item"]
-            st.markdown(
-                f"""
-                <div class="itinerary-slot">
-                  <div class="slot-emoji">{_safe_text(M.media_type_emoji(item['type']))}</div>
-                  <div class="slot-label">{_safe_text(entry['slot'])}</div>
-                  <div class="slot-item">
-                    <h4>{_safe_text(item['title'])}</h4>
-                    <div class="meta">{_safe_text(item['creator'])} · {_safe_text(item['year'])} · {_safe_text(item['type'])} · {_safe_text(entry['score'])} match</div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            with st.expander("Why this slot?", expanded=(idx == 0)):
-                st.markdown(render_why(item, wk["mood"]), unsafe_allow_html=True)
-
-
-# ============================================================
-# TAB 3: CROSS-MEDIA DISCOVERY
-# ============================================================
-with tab_discover:
-    st.markdown('<div class="section-label">Finished something? Find its emotional cousins across every medium.</div>', unsafe_allow_html=True)
-
-    finished_items_raw: list[dict | None] = [M.item_by_id(i) for i in st.session_state.finished]
-    finished_items: list[dict] = [i for i in finished_items_raw if i is not None]
-    first_id: str = finished_items[0]["id"] if finished_items else "m_eternal"
-    default_seed: str = st.session_state.get("discover_seed_select") or first_id
-
-    # If user has a finished shelf, show a quick view of it
-    if finished_items:
-        st.markdown("**Your finished shelf:**")
-        chips = "".join(
-            f'<span class="mood-pill">{_safe_text(M.media_type_emoji(i["type"]))} {_safe_text(i["title"])}</span>'
-            for i in finished_items[-8:]
-        )
-        st.markdown(chips, unsafe_allow_html=True)
-        st.markdown('<div style="height:0.6rem"></div>', unsafe_allow_html=True)
-
-    all_ids = [i["id"] for i in M.all_items()]
-    default_idx = all_ids.index(default_seed) if default_seed in all_ids else 0
-
-    def _fmt(x: str) -> str:
-        i = M.item_by_id(x)
-        if i is None:
-            return x
-        return f'{M.media_type_emoji(i["type"])} {i["title"]} ({i["year"]})'
-
-    seed_id = st.selectbox(
-        "seed_item",
-        options=all_ids,
-        index=default_idx,
-        format_func=_fmt,
-        label_visibility="collapsed",
-        key="discover_seed_select",
-    )
-
-    seed = M.item_by_id(seed_id)
-    if seed:
-        related = M.unlock_related(seed_id)
-        st.markdown(
-            f"""
-            <div class="festival-hero" style="margin-top:1rem;">
-              <div class="type-chip {_safe_text(seed['type'])}" style="display:inline-block;">{_safe_text(M.media_type_emoji(seed['type']))} {_safe_text(seed['type'])}</div>
-              <h2>{_safe_text(seed['title'])}</h2>
-              <div class="tagline">{_safe_text(seed.get('pitch',''))}</div>
-              <div class="window">{_safe_text(seed['emotional_arc'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("### Cross-media emotional cousins")
-        st.caption("Each recommendation below shares the emotional fingerprint of what you just finished.")
-        for r in related:
-            item = r["item"]
-            st.markdown(render_card(item, r["score"]), unsafe_allow_html=True)
-            if r["shared_themes"]:
+    saved_weekend = st.session_state.get("weekend_rag")
+    if saved_weekend:
+        results = saved_weekend.get("candidates", [])
+        recommendation = saved_weekend.get("recommendation")
+        if results:
+            st.markdown(f"### Stories for your weekend")
+            for item in results:
                 st.markdown(
-                    f'<div style="margin-top:-0.5rem; margin-bottom:0.5rem;">'
-                    f'<span class="mood-pill" style="font-size:0.7rem;">shared themes: {_safe_text(", ".join(r["shared_themes"]))}</span>'
-                    f'</div>',
+                    render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
-            with st.expander("Why this matches", expanded=False):
-                st.markdown(render_why(item, seed["mood"]), unsafe_allow_html=True)
+            if recommendation is None and saved_weekend.get("rerank_state", "pending") == "pending":
+                try:
+                    logger.info("[RAG] weekend concierge starting LLM rerank for query=%r", saved_weekend.get("query", ""))
+                    with st.spinner("Writing your personalized recommendation..."):
+                        saved_weekend["recommendation"] = run_story_rerank(
+                            str(saved_weekend.get("query", "")),
+                            results,
+                        )
+                        saved_weekend["rerank_state"] = "complete"
+                        st.session_state.weekend_rag = saved_weekend
+                    st.rerun()
+                except Exception as exc:
+                    logger.warning("[RAG] weekend rerank FAILED: %s: %s", type(exc).__name__, exc)
+                    saved_weekend["rerank_state"] = "failed"
+                    st.session_state.weekend_rag = saved_weekend
+                    _show_operation_error("Personalized pitch", exc)
+            elif recommendation is None and saved_weekend.get("rerank_state") == "failed":
+                st.warning("The semantic matches are available, but the personalized pitch could not be generated.")
+        else:
+            st.info("No matching stories found for that mood. Try a different description.")
+
 
 
 # ============================================================
-# TAB 4: FESTIVALS
+# TAB 3: FESTIVALS
 # ============================================================
 with tab_festival:
-    st.markdown('<div class="section-label">AI-curated festivals, refreshed every week</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">Festival-themed stories, curated by mood</div>', unsafe_allow_html=True)
 
-    c1, c2 = st.columns([2, 2])
-    with c1:
-        fest_prompt = st.text_input(
-            "fest_mood",
-            placeholder="Tune the festival to a mood (optional)…",
-            label_visibility="collapsed",
-            key="fest_input",
-        )
-    with c2:
-        fest_choices = [t["name"] for t in M.FESTIVAL_TEMPLATES]
-        default_fest_idx = 0
-        if st.session_state.get("fest_template_select_widget") in fest_choices:
-            default_fest_idx = fest_choices.index(st.session_state["fest_template_select_widget"])
-        fest_choice = st.selectbox(
-            "festival_template",
-            options=fest_choices,
-            index=default_fest_idx,
-            label_visibility="collapsed",
-            key="fest_template_select_widget",
-        )
+    fest_prompt = st.text_input(
+        "fest_mood",
+        placeholder="Describe the festival mood you're in the mood for...",
+        label_visibility="collapsed",
+        key="fest_input",
+    )
 
-    c1, c2, _ = st.columns([1, 1, 4])
-    with c1:
-        gen_clicked = st.button("Generate this weekend's festival", type="primary", use_container_width=True)
+    _, c2 = st.columns([3, 1])
     with c2:
-        st.button(
-            "Surprise me",
-            use_container_width=True,
-            on_click=_set_random_festival_template,
-            args=(fest_choices,),
-        )
+        gen_clicked = st.button("Generate festival stories", type="primary", use_container_width=True)
 
     if gen_clicked:
-        template = next(t for t in M.FESTIVAL_TEMPLATES if t["name"] == fest_choice)
-        user_mood = M.parse_mood(fest_prompt) if fest_prompt else None
-        st.session_state.festival = M.generate_festival(template, user_mood)
+        if fest_prompt.strip():
+            query = f"Festival themed stories for {fest_prompt.strip()}"
+            try:
+                logger.info("[RAG] festival search submitted: query=%r", query)
+                with st.spinner("Finding festival stories..."):
+                    candidates = run_story_retrieval(query)
+                    st.session_state.festival_rag = {
+                        "query": query,
+                        "candidates": candidates,
+                        "recommendation": None,
+                        "rerank_state": "pending",
+                    }
+            except Exception as exc:
+                _show_operation_error("Festival search", exc)
+        else:
+            st.warning("Enter a mood or theme for the festival.")
 
-    if st.session_state.festival:
-        f = st.session_state.festival
-        st.markdown(
-            f"""
-            <div class="festival-hero" style="margin-top:1rem;">
-              <div class="window">Showing {f['starts']} → {f['ends']}</div>
-              <h2>{_safe_text(f['name'])}</h2>
-              <div class="tagline">{_safe_text(f['tagline'])}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown("### The lineup")
-        template = next(t for t in M.FESTIVAL_TEMPLATES if t["name"] == f["name"])
-        for idx, entry in enumerate(f["lineup"]):
-            item = entry["item"]
-            st.markdown(render_card(item, entry["score"]), unsafe_allow_html=True)
-            with st.expander("Why this one?", expanded=(idx == 0)):
-                st.markdown(render_why(item, template["mood_bias"]), unsafe_allow_html=True)
+    saved_festival = st.session_state.get("festival_rag")
+    if saved_festival:
+        results = saved_festival.get("candidates", [])
+        recommendation = saved_festival.get("recommendation")
+        if results:
+            st.markdown(f"### Festival stories")
+            for item in results:
+                st.markdown(
+                    render_summary_card(item, item.get("vector_similarity", 0.0)),
+                    unsafe_allow_html=True,
+                )
+            if recommendation is None and saved_festival.get("rerank_state", "pending") == "pending":
+                try:
+                    logger.info("[RAG] festival starting LLM rerank for query=%r", saved_festival.get("query", ""))
+                    with st.spinner("Writing your personalized recommendation..."):
+                        saved_festival["recommendation"] = run_story_rerank(
+                            str(saved_festival.get("query", "")),
+                            results,
+                        )
+                        saved_festival["rerank_state"] = "complete"
+                        st.session_state.festival_rag = saved_festival
+                    st.rerun()
+                except Exception as exc:
+                    logger.warning("[RAG] festival rerank FAILED: %s: %s", type(exc).__name__, exc)
+                    saved_festival["rerank_state"] = "failed"
+                    st.session_state.festival_rag = saved_festival
+                    _show_operation_error("Personalized pitch", exc)
+            elif recommendation is None and saved_festival.get("rerank_state") == "failed":
+                st.warning("The semantic matches are available, but the personalized pitch could not be generated.")
+        else:
+            st.info("No matching stories found for that theme. Try a different description.")
 
 
 # ============================================================
-# TAB 5: AI STORY SEARCH
+# TAB 1: TELL US YOUR MOOD
 # ============================================================
-with tab_context:
+with tab_mood:
     st.markdown('<div class="section-label">Semantic story search</div>', unsafe_allow_html=True)
     st.caption(
         "Story vectors are built offline once. Search shows semantic matches as soon as your "
