@@ -55,28 +55,13 @@ def _generate_tts_audio(script: str) -> bytes:
     response = get_client().with_options(
         timeout=TTS_TIMEOUT_SECONDS,
         max_retries=TTS_MAX_RETRIES,
-    ).chat.completions.create(
+    ).audio.speech.create(
         model=TTS_MODEL,
-        modalities=["text", "audio"],
-        audio={"voice": TTS_VOICE, "format": "mp3"},
-        messages=[
-            {
-                "role": "system",
-                "content": "Read the supplied story summary naturally and faithfully. Do not add commentary.",
-            },
-            {"role": "user", "content": script},
-        ],
+        voice=TTS_VOICE,
+        input=script,
+        response_format="mp3",
     )
-    choices = getattr(response, "choices", None)
-    if not choices:
-        raise ValueError("Text-to-Speech model returned no choices.")
-    generated_audio = getattr(choices[0].message, "audio", None)
-    if not generated_audio or not generated_audio.data:
-        raise ValueError("Text-to-Speech model returned empty audio.")
-    try:
-        return base64.b64decode(generated_audio.data, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ValueError("Text-to-Speech model returned invalid audio data.") from exc
+    return response.content
 
 
 def generate_summary_audio(story: dict[str, Any]) -> bytes:
