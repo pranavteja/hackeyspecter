@@ -440,81 +440,23 @@ def _is_safe_http_url(value: object) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def _record_diagnostic(action: str, exc: BaseException, level: str = "error") -> None:
-    """Append a structured error record to the Diagnostics panel."""
-    entry = {
-        "ts": time.time(),
-        "level": level,
-        "action": action,
-        "type": type(exc).__name__,
-        "message": str(exc) or "(no message)",
-        "traceback": "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        ).rstrip(),
-    }
-    history: list[dict] = st.session_state.setdefault("diagnostics_errors", [])
-    history.append(entry)
-    if len(history) > 20:
-        del history[: len(history) - 20]
-
-
-def _format_diagnostics_blob(errors: list[dict]) -> str:
-    """Format env status + all errors as a single text blob for paste/relay."""
-    lines: list[str] = []
-    lines.append("=" * 70)
-    lines.append("HACKEY SPECTER — DIAGNOSTICS")
-    lines.append(f"Captured at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("=" * 70)
-    lines.append("")
-    lines.append("ENVIRONMENT")
-    lines.append("-" * 70)
-    key = os.environ.get("OPENAI_API_KEY", "")
-    lines.append(f"OPENAI_API_KEY: {'SET' if key else 'NOT SET'} ({len(key)} chars)")
-    for var in (
-        "RAG_RERANK_MODEL",
-        "RAG_EMBEDDING_MODEL",
-        "RAG_FEATURE_MODEL",
-        "RAG_TTS_MODEL",
-        "RAG_TRANSCRIPTION_MODEL",
-        "OPENAI_TIMEOUT_SECONDS",
-    ):
-        lines.append(f"{var}: {os.environ.get(var, '<default>')}")
-    lines.append("")
-    lines.append(f"ERRORS ({len(errors)})")
-    lines.append("-" * 70)
-    if not errors:
-        lines.append("(none)")
-    for i, e in enumerate(errors, 1):
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["ts"]))
-        lines.append("")
-        lines.append(f"[{i}] {e['action']} — {e['type']} — {ts}")
-        lines.append(f"    message: {e['message']}")
-        lines.append("    traceback:")
-        for tb_line in e["traceback"].splitlines():
-            lines.append(f"      {tb_line}")
-    return "\n".join(lines)
-
-
 def _show_operation_error(action: str, exc: Exception) -> None:
-    """Keep implementation details in logs while showing users a stable recovery path."""
+    """Print the real error on screen. No abstraction, no hiding."""
     logger.exception("%s failed", action, exc_info=exc)
-    _record_diagnostic(action, exc)
-    st.error(f"{action} could not run. Please check your connection and try again.")
+    st.error(f"{action} failed: {type(exc).__name__}: {exc}")
+    with st.expander(f"Traceback for: {action}", expanded=True):
+        st.code(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
+            or f"(no traceback available)\n{exc!r}",
+            language="text",
+        )
 
 
-MAX_DIAGNOSTIC_ENTRIES = 20
-
-
-def render_diagnostics_panel() -> None:
-    """Main-page expander: env status + recent error tracebacks for easy relay."""
-    errors: list[dict] = st.session_state.get("diagnostics_errors", [])
-    n = len(errors)
-    label = f"🔧 Diagnostics ({n})" if n else "🔧 Diagnostics"
-    with st.expander(label, expanded=(n > 0)):
-        st.markdown("**Environment**")
+def render_env_status() -> None:
+    """Tiny env-status block. No buttons, no panels — just the facts."""
+    with st.expander("Environment", expanded=False):
         key = os.environ.get("OPENAI_API_KEY", "")
-        key_status = "✅ set" if key else "❌ NOT SET"
-        st.markdown(f"- `OPENAI_API_KEY`: {key_status} ({len(key)} chars)")
+        st.markdown(f"- `OPENAI_API_KEY`: {'set' if key else 'NOT SET'} ({len(key)} chars)")
         for var in (
             "RAG_RERANK_MODEL",
             "RAG_EMBEDDING_MODEL",
@@ -524,43 +466,8 @@ def render_diagnostics_panel() -> None:
         ):
             st.markdown(f"- `{var}`: `{os.environ.get(var, '<default>')}`")
 
-        st.markdown("---")
-        st.markdown(f"**Recent errors ({n})**")
-        if n == 0:
-            st.caption("No errors recorded yet. Trigger a search/voice action to populate.")
-        else:
-            cols = st.columns(2)
-            with cols[0]:
-                if st.button("Clear error log", key="diag_clear", use_container_width=True):
-                    st.session_state["diagnostics_errors"] = []
-                    st.rerun()
-            with cols[1]:
-                if st.button("Refresh panel", key="diag_refresh", use_container_width=True):
-                    st.rerun()
-            for i, entry in enumerate(reversed(errors), 1):
-                with st.container():
-                    ts = time.strftime("%H:%M:%S", time.localtime(entry["ts"]))
-                    st.markdown(
-                        f"**{i}. {entry['action']}** · `{entry['type']}` · {ts}"
-                    )
-                    st.markdown(f"> {entry['message'][:300]}")
-                    st.code(entry["traceback"], language="text")
 
-            # Single text blob of the whole diagnostics state for easy paste.
-            # st.text_area is universally supported and works inside Databricks Apps'
-            # sandboxed iframe (download_button often isn't). Select all + copy.
-            st.markdown("**Full diagnostics blob (select all + copy):**")
-            blob = _format_diagnostics_blob(errors)
-            st.text_area(
-                "diagnostics",
-                value=blob,
-                height=min(600, 80 + 18 * blob.count("\n")),
-                label_visibility="collapsed",
-                key="diag_blob",
-            )
-
-
-render_diagnostics_panel()
+render_env_status()
 
 
 def render_card(item: dict, score: float | None = None) -> str:
