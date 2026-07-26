@@ -161,22 +161,26 @@ THEME_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@300;400;500;600&display=swap');
 
 :root {
-  --bg: #faf6ef;          /* warm cream paper */
-  --bg-soft: #f1ebde;
+  --bg: #fff8f1;          /* warm cream paper */
+  --bg-soft: #f8eddf;
   --bg-card: #ffffff;     /* slightly brighter card */
-  --bg-card-hover: #f7f1e3;
-  --ink: #2a2520;         /* deep warm brown */
-  --ink-soft: #5a4f44;
-  --ink-dim: #8a7f72;
-  --accent: #b87a7a;      /* deeper dusty rose */
-  --accent-warm: #b88040; /* deeper amber */
-  --accent-cool: #5a8a7a; /* deeper teal */
-  --border: #e6dfd0;
-  --shadow: 0 4px 20px rgba(80, 60, 40, 0.08);
+  --bg-card-hover: #fff6eb;
+  --ink: #30231f;         /* deep warm brown */
+  --ink-soft: #654d45;
+  --ink-dim: #997b72;
+  --accent: #d65d6a;      /* lively coral */
+  --accent-warm: #d68b35; /* marigold */
+  --accent-cool: #318c85; /* jewel teal */
+  --accent-plum: #7d5ab5;
+  --border: #edd9ca;
+  --shadow: 0 8px 28px rgba(120, 67, 47, 0.10);
 }
 
 html, body, [data-testid="stAppViewContainer"] {
-  background: var(--bg) !important;
+  background:
+    radial-gradient(circle at 93% 2%, rgba(214, 93, 106, 0.13), transparent 21rem),
+    radial-gradient(circle at 8% 19%, rgba(49, 140, 133, 0.10), transparent 20rem),
+    var(--bg) !important;
   color: var(--ink) !important;
   font-family: 'Inter', -apple-system, sans-serif !important;
 }
@@ -202,7 +206,13 @@ h1, h2, h3, h4 {
   margin: 0;
   line-height: 1.05;
 }
-.hero-title .accent { color: var(--accent); font-style: italic; }
+.hero-title .accent {
+  background: linear-gradient(100deg, var(--accent), var(--accent-plum), var(--accent-warm));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-style: italic;
+}
 .hero-sub {
   font-family: 'Inter', sans-serif;
   font-size: 1.05rem;
@@ -231,11 +241,14 @@ h1, h2, h3, h4 {
   transition: all 0.2s ease;
 }
 [data-testid="stTabs"] button[role="tab"]:hover {
-  color: var(--ink-soft);
+  color: var(--accent);
+  background: rgba(214, 93, 106, 0.07);
 }
 [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  border-bottom-color: transparent;
+  background: linear-gradient(135deg, rgba(214, 93, 106, 0.13), rgba(125, 90, 181, 0.10));
+  box-shadow: inset 0 -3px 0 var(--accent);
 }
 
 .card {
@@ -243,13 +256,21 @@ h1, h2, h3, h4 {
   border: 1px solid var(--border);
   border-radius: 18px;
   margin-bottom: 1.25rem;
-  box-shadow: 0 6px 24px rgba(80, 60, 40, 0.08);
+  box-shadow: var(--shadow);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   overflow: hidden;
+  position: relative;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-plum), var(--accent-cool));
 }
 .card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 12px 32px rgba(80, 60, 40, 0.12);
+  box-shadow: 0 14px 34px rgba(120, 67, 47, 0.16);
 }
 .card-inner {
   display: flex;
@@ -265,11 +286,11 @@ h1, h2, h3, h4 {
   justify-content: center;
   background: linear-gradient(135deg, var(--bg-soft), var(--border));
 }
-.card-thumbnail.movie { background: linear-gradient(135deg, #f3d5d5, #c9a0a0); }
-.card-thumbnail.book { background: linear-gradient(135deg, #f3e0c5, #d4b88c); }
-.card-thumbnail.podcast { background: linear-gradient(135deg, #cde7de, #8ab8aa); }
-.card-thumbnail.game { background: linear-gradient(135deg, #e4d9f2, #b8a7d1); }
-.card-thumbnail.music { background: linear-gradient(135deg, #e6d4e6, #c4a8c4); }
+.card-thumbnail.movie { background: linear-gradient(135deg, #ffd8d0, #e88c9a); }
+.card-thumbnail.book { background: linear-gradient(135deg, #ffe6a9, #dfaa58); }
+.card-thumbnail.podcast { background: linear-gradient(135deg, #c4f0e7, #58b7a9); }
+.card-thumbnail.game { background: linear-gradient(135deg, #e4d7ff, #a784df); }
+.card-thumbnail.music { background: linear-gradient(135deg, #f4d5fb, #c889cd); }
 .card-art {
   font-size: 3.2rem;
   opacity: 0.85;
@@ -334,7 +355,6 @@ h1, h2, h3, h4 {
     flex: 1 1 100%;
     padding: 1rem;
   }
-  }
 }
 
 .why-box {
@@ -351,7 +371,8 @@ h1, h2, h3, h4 {
 }
 
 .festival-hero {
-  background: radial-gradient(ellipse at top, rgba(184,122,122,0.10), transparent 70%),
+  background: radial-gradient(circle at 88% 18%, rgba(214, 139, 53, 0.25), transparent 13rem),
+              radial-gradient(ellipse at top, rgba(214, 93, 106, 0.13), transparent 70%),
               linear-gradient(180deg, #ffffff, var(--bg-soft));
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -431,7 +452,7 @@ h1, h2, h3, h4 {
 }
 
 .stButton > button {
-  background: var(--accent) !important;
+  background: linear-gradient(100deg, var(--accent), #df6e68 48%, var(--accent-warm)) !important;
   color: #fff !important;
   border: none !important;
   border-radius: 8px !important;
@@ -441,7 +462,8 @@ h1, h2, h3, h4 {
   transition: all 0.15s ease !important;
 }
 .stButton > button:hover {
-  background: var(--accent-warm) !important;
+  background: linear-gradient(100deg, #bd475b, var(--accent), var(--accent-warm)) !important;
+  box-shadow: 0 8px 18px rgba(214, 93, 106, 0.22);
   transform: translateY(-1px);
 }
 .stButton > button:active { transform: translateY(0); }
@@ -457,7 +479,7 @@ h1, h2, h3, h4 {
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
   border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(184,122,122,0.15) !important;
+  box-shadow: 0 0 0 3px rgba(214, 93, 106, 0.16) !important;
 }
 
 .stSelectbox [data-baseweb="select"] > div {
