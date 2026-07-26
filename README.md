@@ -1,7 +1,7 @@
 # Hackey Specter 🕯️
 
 
-python -c "from preprocess_stories import process_and_embed_dataset; process_and_embed_dataset('summary_1to16000.json', 'stories_vector_store.npz')"
+python -c "from preprocess_stories import import_precomputed_embeddings; import_precomputed_embeddings(r'C:\Users\sumit\Downloads\ultimate_pocketfm_master_dataset_with_embeddings.json', 'ultimate_pocketfm_vector_store.npz')"
 
 
 > Tell us how you want to feel. We'll find the movie, book, podcast, or game
@@ -64,21 +64,24 @@ or the deployment environment before use.
 
 ### RAG data lifecycle
 
-Run `process_and_embed_dataset("summary_1to16000.json",
-"stories_vector_store.npz")` once whenever the source summaries change. It
-creates the saved feature and vector database. The running app never embeds the
-full JSON file: it loads `stories_vector_store.npz`, embeds only the user's
-query, and performs NumPy cosine search. The top five matches render before
-the automatic reranker is asked to write a pitch. If preprocessing is
-interrupted, a model-specific `*.features-cache.json` checkpoint preserves
-successful feature extraction for the next run.
+Run `import_precomputed_embeddings(
+"C:/Users/sumit/Downloads/ultimate_pocketfm_master_dataset_with_embeddings.json",
+"ultimate_pocketfm_vector_store.npz")` once whenever the supplied master JSON
+changes. It streams the dataset, reuses its existing 3,072-dimensional
+`embedding` field, normalizes the matrix, and creates the saved NumPy store;
+it does not make corpus feature-extraction or embedding API calls. The running
+app never rereads the full JSON file: it loads
+`ultimate_pocketfm_vector_store.npz`, embeds only the user's query with the
+matching `text-embedding-3-large` model, and performs NumPy cosine search. The
+top five matches render before the automatic reranker is asked to write a
+pitch. Keep the source JSON and generated NPZ out of Git; use artifact storage
+for deployment.
 
-The default quality profile uses `gpt-5.6-sol` for offline feature extraction,
-`gpt-5.6-terra` with low reasoning for live reranking, and
-`text-embedding-3-large` at 3072 dimensions. After changing to this profile,
-run preprocessing once to rebuild the existing legacy 1536-dimensional store.
-Later runs reuse unchanged records and vectors, and a fully unchanged dataset
-performs no OpenAI API work.
+The default quality profile uses `gpt-5.6-terra` with low reasoning for live
+reranking and `text-embedding-3-large` at 3072 dimensions for the one query
+embedding. `process_and_embed_dataset()` remains available only for a source
+dataset that has no precomputed vectors. The precomputed importer fast-paths an
+unchanged source file without rereading it.
 
 ## Run locally
 

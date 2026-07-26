@@ -7,14 +7,19 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
 from audio_utils import _generate_tts_audio, is_playable_audio_url, summary_for_speech
-from mood_engine.check_intent import check_intent
-from preprocess_stories import _embed_payloads, _extract_features_with_retry
+from mood_engine.check_intent import check_intent, search_stories
+from preprocess_stories import (
+    _embed_payloads,
+    _extract_features_with_retry,
+    import_precomputed_embeddings,
+)
 from recommend_and_pitch import generate_final_recommendation
 from search_engine import (
     StoryDatabase,
@@ -42,9 +47,11 @@ class VectorSearchTests(unittest.TestCase):
 
     @patch("search_engine._embed_normalized_query", return_value=(1.0, 0.0))
     def test_returns_descending_top_k(self, mock_embed: object) -> None:
-        results = vector_search("calm story", self.database, top_k=2)
+        with self.assertLogs("search_engine", level="INFO") as logs:
+            results = vector_search("calm story", self.database, top_k=2)
         self.assertEqual([result["record_id"] for result in results], ["a", "b"])
         self.assertGreater(results[0]["vector_similarity"], results[1]["vector_similarity"])
+        self.assertTrue(any("corpus_embeddings=3" in line for line in logs.output))
 
     def test_rejects_empty_prompt(self) -> None:
         with self.assertRaisesRegex(ValueError, "Enter a story"):
@@ -212,6 +219,43 @@ class PreprocessTests(unittest.TestCase):
         self.assertEqual(result, expected)
         self.assertEqual(mock_extract.call_count, 2)
 
+    @patch("preprocess_stories.get_client")
+    def test_imports_supplied_embeddings_without_openai_calls(self, mock_client: object) -> None:
+        source_records = [
+            {
+                "cmu_id": "first",
+                "title": "First",
+                "summary": "A quiet story.",
+                "embedding": [3.0, 4.0],
+            },
+            {
+                "cmu_id": "second",
+                "title": "Second",
+                "summary": "An energetic story.",
+                "embedding": [0.0, 5.0],
+            },
+        ]
+        # The Windows sandbox can deny the global user Temp directory; tests
+        # should keep their disposable fixture inside the writable repository.
+        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            source_path = Path(directory) / "embedded_stories.json"
+            output_path = Path(directory) / "stories.npz"
+            source_path.write_text(json.dumps(source_records), encoding="utf-8")
+
+            result_path = import_precomputed_embeddings(
+                str(source_path),
+                str(output_path),
+                embedding_model="test-embedding",
+            )
+            database = load_database(str(result_path))
+
+        self.assertEqual(database.embedding_model, "test-embedding")
+        self.assertEqual(database.embedding_dimensions, 2)
+        self.assertEqual([record["record_id"] for record in database.records], ["first", "second"])
+        self.assertTrue(all("embedding" not in record for record in database.records))
+        np.testing.assert_allclose(database.embeddings, [[0.6, 0.8], [0.0, 1.0]], atol=1e-6)
+        mock_client.assert_not_called()
+
 
 class IntentTests(unittest.TestCase):
     @patch("mood_engine.check_intent.get_client")
@@ -227,6 +271,30 @@ class IntentTests(unittest.TestCase):
         request = mock_client.return_value.responses.create.call_args.kwargs
         self.assertEqual(request["text"]["format"]["type"], "json_schema")
         self.assertFalse(request["store"])
+
+    @patch("search_engine.vector_search")
+    @patch("mood_engine.check_intent._story_database")
+    @patch("mood_engine.check_intent._vector_store_signature", return_value="store-signature")
+    def test_search_stories_preserves_tuple_contract_with_vector_store(
+        self,
+        mock_signature: object,
+        mock_database: object,
+        mock_vector_search: object,
+    ) -> None:
+        database = object()
+        mock_database.return_value = database
+        mock_vector_search.return_value = [
+            {"record_id": "one", "title": "Vector Match", "vector_similarity": 0.81}
+        ]
+
+        result = search_stories({"query": "cozy mystery", "keywords": ["rain", "comfort"]}, k=1)
+
+        self.assertEqual(result, [({"record_id": "one", "title": "Vector Match", "vector_similarity": 0.81}, 0.81)])
+        mock_vector_search.assert_called_once_with(
+            "cozy mystery rain comfort",
+            database,
+            top_k=1,
+        )
 
 
 if __name__ == "__main__":

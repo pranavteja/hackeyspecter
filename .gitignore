@@ -13,6 +13,10 @@ env/
 .coverage
 .env
 *.features-cache.json
+# Large local RAG source/store artifacts. Keep these out of Git and place them
+# in external artifact storage for deployments.
+ultimate_pocketfm_master_dataset_with_embeddings.json
+ultimate_pocketfm_vector_store.npz
 htmlcov/
 dist/
 build/

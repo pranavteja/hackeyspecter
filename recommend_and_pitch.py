@@ -6,9 +6,9 @@ from typing import Any
 
 from rag_config import RERANK_MODEL, get_client, response_reasoning_options
 
-# Retrieval already carries atmospheric keywords and 12 emotional axes. Keeping
-# the LLM's prose context compact cuts rerank latency without losing the signals
-# it needs to distinguish the five semantic candidates.
+# Feature-enriched stores carry atmospheric keywords and emotional axes; stores
+# imported from supplied embeddings use the original summary as their compact
+# fallback. Keeping the LLM context bounded still cuts rerank latency.
 MAX_CANDIDATE_DESCRIPTION_CHARACTERS = 900
 MAX_RERANK_OUTPUT_TOKENS = 260
 MAX_RERANK_CANDIDATES = 5

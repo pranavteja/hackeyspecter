@@ -20,6 +20,8 @@ from rag_config import (
     QUERY_EMBEDDING_MAX_RETRIES,
     QUERY_EMBEDDING_TIMEOUT_SECONDS,
     get_client,
+    EMBEDDING_MODEL,
+    EMBEDDING_DIMENSIONS,
 )
 
 MAX_QUERY_CHARACTERS = 4_000
@@ -137,6 +139,16 @@ def load_database(db_path: str) -> StoryDatabase:
         raise ValueError("Vector store contains duplicate record IDs. Rebuild it with unique source IDs.")
     stat = path.stat()
     fingerprint = str(metadata.get("build_fingerprint") or f"legacy-{stat.st_mtime_ns}-{stat.st_size}")
+    # Log store details so runtime users can verify which corpus is loaded.
+    logger.info(
+        "Loaded vector store: path=%s records=%d embedding_model=%s embedding_dimensions=%d build_fingerprint=%s",
+        str(path),
+        len(raw_records),
+        model,
+        dimensions,
+        fingerprint,
+    )
+    print(f"[search_engine] Loaded vector store: path={path} records={len(raw_records)} model={model} dims={dimensions} fingerprint={fingerprint}")
     return StoryDatabase(
         records=records,
         # New stores are written normalized. Avoid an otherwise expensive second
@@ -151,6 +163,7 @@ def load_database(db_path: str) -> StoryDatabase:
 @lru_cache(maxsize=QUERY_CACHE_SIZE)
 def _embed_normalized_query(prompt: str, model: str, dimensions: int) -> np.ndarray:
     """Embed an exact repeated query once per process and return an immutable unit vector."""
+    print(f"[search_engine] embedding request starting: model={model} dims={dimensions}")
     response = get_client().with_options(
         timeout=QUERY_EMBEDDING_TIMEOUT_SECONDS,
         max_retries=QUERY_EMBEDDING_MAX_RETRIES,
@@ -171,6 +184,7 @@ def _embed_normalized_query(prompt: str, model: str, dimensions: int) -> np.ndar
     # lru_cache returns the same object for a cache hit. Mark it read-only so a
     # caller cannot corrupt later searches by mutating the cached vector.
     normalized.setflags(write=False)
+    print(f"[search_engine] embedding request finished: model={model} dims={dimensions} len={normalized.shape[0]}")
     return normalized
 
 
@@ -242,6 +256,31 @@ def vector_search(user_prompt: str, database: StoryDatabase, top_k: int = 5) -> 
         prompt,
         database.embedding_model,
         database.embedding_dimensions,
+    )
+    # Emit runtime telemetry to help verify which embedding model and
+    # corpus fingerprint were used for this search.
+    if database.embedding_model != EMBEDDING_MODEL:
+        logger.warning(
+            "Query embedding model mismatch: runtime_embedding_model=%s store_embedding_model=%s",
+            EMBEDDING_MODEL,
+            database.embedding_model,
+        )
+        print(f"[search_engine] WARNING: Query embedding model mismatch: runtime={EMBEDDING_MODEL} store={database.embedding_model}")
+    logger.info(
+        "Vector search starting: corpus_embeddings=%d store_dims=%d requested_top_k=%d "
+        "store_fingerprint=%s store_model=%s embedding_reused=%s",
+        database.embeddings.shape[0],
+        database.embedding_dimensions,
+        top_k,
+        getattr(database, "build_fingerprint", "unknown"),
+        database.embedding_model,
+        embedding_reused,
+    )
+    print(
+        f"[search_engine] Vector search starting: corpus_embeddings={database.embeddings.shape[0]} "
+        f"store_dims={database.embedding_dimensions} requested_top_k={top_k} "
+        f"store_fingerprint={getattr(database, 'build_fingerprint', 'unknown')} "
+        f"store_model={database.embedding_model} embedding_reused={embedding_reused}"
     )
     embedding_elapsed_ms = (perf_counter() - embedding_started) * 1_000
     ranking_started = perf_counter()
