@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from rag_config import FEATURE_MODEL, get_client, response_reasoning_options
+from vector_store import materialize_vector_store
 
 logger = logging.getLogger(__name__)
 VECTOR_STORE_FILENAME = "ultimate_pocketfm_vector_store.npz"
@@ -114,14 +115,14 @@ def _parse_json_object(model_output: str) -> dict[str, Any]:
     return value
 
 
-def _vector_store_signature() -> str:
-    if not VECTOR_STORE_PATH.is_file():
+def _vector_store_signature(vector_store_path: Path) -> str:
+    if not vector_store_path.is_file():
         raise FileNotFoundError(
             "The offline vector store is missing at "
-            f"{VECTOR_STORE_PATH}. RAG_VECTOR_STORE_VOLUME is "
+            f"{vector_store_path}. RAG_VECTOR_STORE_VOLUME is "
             f"{os.getenv('RAG_VECTOR_STORE_VOLUME', '<not set>')!r}."
         )
-    stat = VECTOR_STORE_PATH.stat()
+    stat = vector_store_path.stat()
     return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
@@ -149,7 +150,8 @@ def search_stories(intent: dict[str, Any], k: int = 5) -> list[tuple[dict[str, A
         return []
     from search_engine import vector_search
 
-    database = _story_database(str(VECTOR_STORE_PATH), _vector_store_signature())
+    vector_store_path = materialize_vector_store(str(VECTOR_STORE_PATH))
+    database = _story_database(str(vector_store_path), _vector_store_signature(vector_store_path))
     matches = vector_search(search_prompt, database, top_k=k)
     results = [(item, float(item["vector_similarity"])) for item in matches]
     logger.info("Vector summary search completed: %d matches returned", len(results))

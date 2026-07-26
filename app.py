@@ -26,6 +26,7 @@ from data.content import SAMPLE_PROMPTS
 from audio_utils import generate_summary_audio, is_playable_audio_url, transcribe_voice_input
 from recommend_and_pitch import generate_final_recommendation
 from search_engine import StoryDatabase, canonicalize_query, load_database, vector_search
+from vector_store import materialize_vector_store
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,10 +57,10 @@ T = TypeVar("T")
 _loaded_vector_store_signature: str | None = None
 
 
-def _vector_store_signature() -> str:
-    if not VECTOR_STORE_PATH.exists():
+def _vector_store_signature(vector_store_path: Path) -> str:
+    if not vector_store_path.exists():
         return "missing"
-    stat = VECTOR_STORE_PATH.stat()
+    stat = vector_store_path.stat()
     return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
@@ -85,12 +86,13 @@ def get_story_database(path: str, signature: str) -> StoryDatabase:
 def get_active_story_database() -> StoryDatabase:
     """Refresh the cached database automatically when the offline store is replaced."""
     global _loaded_vector_store_signature
-    signature = _vector_store_signature()
+    vector_store_path = materialize_vector_store(str(VECTOR_STORE_PATH))
+    signature = _vector_store_signature(vector_store_path)
     if _loaded_vector_store_signature not in (None, signature):
         # Avoid retaining an old full matrix after repeated offline rebuilds.
         get_story_database.clear()
     _loaded_vector_store_signature = signature
-    return get_story_database(str(VECTOR_STORE_PATH), signature)
+    return get_story_database(str(vector_store_path), signature)
 
 
 def _story_cache_key(database: StoryDatabase, search_request: str, namespace: str) -> str:
