@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -12,7 +12,8 @@ from typing import Any
 from rag_config import FEATURE_MODEL, get_client, response_reasoning_options
 
 logger = logging.getLogger(__name__)
-SUMMARY_PATH = Path(__file__).resolve().parents[1] / "summary_1to16000.json"
+DEFAULT_VECTOR_STORE_PATH = Path(__file__).resolve().parents[1] / "ultimate_pocketfm_vector_store.npz"
+VECTOR_STORE_PATH = Path(os.getenv("RAG_VECTOR_STORE_PATH", str(DEFAULT_VECTOR_STORE_PATH))).expanduser()
 
 MODEL = FEATURE_MODEL
 MAX_INPUT_CHARACTERS = 4_000
@@ -97,24 +98,26 @@ def _parse_json_object(model_output: str) -> dict[str, Any]:
     return value
 
 
-def _terms(value: str) -> list[str]:
-    return re.findall(r"[a-z0-9][a-z0-9'-]*", value.lower())
+def _vector_store_signature() -> str:
+    if not VECTOR_STORE_PATH.is_file():
+        raise FileNotFoundError(
+            "The offline vector store is missing. Run import_precomputed_embeddings first."
+        )
+    stat = VECTOR_STORE_PATH.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
-@lru_cache(maxsize=1)
-def _story_summaries() -> list[dict[str, Any]]:
-    """Load the supplied story-summary dataset once per running app process."""
-    logger.info("Loading story summaries from %s", SUMMARY_PATH)
-    with SUMMARY_PATH.open(encoding="utf-8") as source:
-        records = json.load(source)
-    if not isinstance(records, list):
-        raise ValueError("summary_1to16000.json must contain a JSON list.")
-    logger.info("Loaded %d story summaries", len(records))
-    return records
+@lru_cache(maxsize=2)
+def _story_database(path: str, signature: str) -> Any:
+    """Load the already-imported vectors, never the multi-gigabyte source JSON."""
+    from search_engine import load_database
+
+    logger.info("Loading offline story vectors from %s", path)
+    return load_database(path)
 
 
 def search_stories(intent: dict[str, Any], k: int = 5) -> list[tuple[dict[str, Any], float]]:
-    """Rank the supplied story summaries using OpenAI's returned search terms."""
+    """Preserve the legacy tuple contract while using the fast vector store."""
     if not isinstance(intent, dict):
         raise ValueError("intent must be an object returned by check_intent.")
     if not isinstance(k, int) or isinstance(k, bool) or k < 1:
@@ -123,16 +126,13 @@ def search_stories(intent: dict[str, Any], k: int = 5) -> list[tuple[dict[str, A
     keywords = intent.get("keywords", [])
     if not isinstance(query, str) or not isinstance(keywords, list):
         raise ValueError("intent must contain a text query and a keyword list.")
-    query_terms = Counter(_terms(" ".join([query, *(word for word in keywords if isinstance(word, str))])))
-    if not query_terms:
+    search_prompt = " ".join([query, *(word for word in keywords if isinstance(word, str))]).strip()
+    if not search_prompt:
         return []
-    matches: list[tuple[dict[str, Any], float]] = []
-    for item in _story_summaries():
-        summary = " ".join([item.get("title", ""), item.get("summary", "")])
-        summary_terms = Counter(_terms(summary))
-        overlap = sum(query_terms[term] * summary_terms[term] for term in query_terms)
-        if overlap:
-            matches.append((item, round(overlap / max(1, sum(query_terms.values())), 2)))
-    results = sorted(matches, key=lambda result: result[1], reverse=True)[:k]
-    logger.info("Summary search completed: %d matches returned", len(results))
+    from search_engine import vector_search
+
+    database = _story_database(str(VECTOR_STORE_PATH), _vector_store_signature())
+    matches = vector_search(search_prompt, database, top_k=k)
+    results = [(item, float(item["vector_similarity"])) for item in matches]
+    logger.info("Vector summary search completed: %d matches returned", len(results))
     return results

@@ -33,7 +33,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-VECTOR_STORE_PATH = Path(__file__).resolve().with_name("stories_vector_store.npz")
+DEFAULT_VECTOR_STORE_PATH = Path(__file__).resolve().with_name("ultimate_pocketfm_vector_store.npz")
+VECTOR_STORE_PATH = Path(os.getenv("RAG_VECTOR_STORE_PATH", str(DEFAULT_VECTOR_STORE_PATH))).expanduser()
 MAX_SESSION_SEARCH_CACHE_ENTRIES = 20
 T = TypeVar("T")
 _loaded_vector_store_signature: str | None = None
@@ -52,8 +53,8 @@ def get_story_database(path: str, signature: str) -> StoryDatabase:
     vector_path = Path(path)
     if not vector_path.exists():
         raise FileNotFoundError(
-            "The offline vector store is missing. Run process_and_embed_dataset "
-            "once to create stories_vector_store.npz."
+            "The offline vector store is missing. Run import_precomputed_embeddings "
+            "once to create ultimate_pocketfm_vector_store.npz."
         )
     return load_database(str(vector_path))
 
@@ -572,7 +573,7 @@ def render_card(item: dict, score: float | None = None) -> str:
 
 
 def render_summary_card(item: dict, score: float) -> str:
-    """Render a result from summary_1to16000.json without demo metadata."""
+    """Render a result from the imported offline story-vector store."""
     summary = str(item.get("summary", "")).strip()
     preview = summary[:700] + ("…" if len(summary) > 700 else "")
     title = _safe_text(item.get("title", "Untitled"))

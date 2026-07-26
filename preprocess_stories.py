@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -28,6 +28,12 @@ MAX_SOURCE_SUMMARY_CHARACTERS = 12_000
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_EMBEDDING_BATCH_SIZE = 96
 FEATURE_EXTRACTION_ATTEMPTS = 2
+JSON_STREAM_CHUNK_BYTES = 1_048_576
+PRECOMPUTED_IMPORT_VERSION = 1
+# The supplied master dataset has 3,072-dimensional vectors. That is the full
+# size of OpenAI's text-embedding-3-large output. Override this argument only
+# when you know the source JSON was embedded with a different model.
+DEFAULT_PRECOMPUTED_EMBEDDING_MODEL = "text-embedding-3-large"
 EMOTIONAL_AXES = (
     "valence", "energy", "warmth", "tension", "depth", "romance",
     "mystery", "nostalgia", "hope", "melancholy", "wonder", "humor",
@@ -372,6 +378,286 @@ def _write_store(destination: Path, embeddings: np.ndarray, records: list[dict[s
         temporary_path.replace(destination)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _iter_json_array(source_path: Path, *, chunk_bytes: int = JSON_STREAM_CHUNK_BYTES) -> Iterator[Any]:
+    """Yield a top-level JSON array without loading a large dataset into RAM."""
+    if chunk_bytes < 1:
+        raise ValueError("chunk_bytes must be at least 1.")
+
+    decoder = json.JSONDecoder()
+    buffer = ""
+    position = 0
+    started = False
+    expecting_value = True
+    saw_value = False
+    ended = False
+    reached_eof = False
+
+    with source_path.open(encoding="utf-8-sig") as source:
+        def refill() -> bool:
+            nonlocal buffer, position, reached_eof
+            if position:
+                buffer = buffer[position:]
+                position = 0
+            chunk = source.read(chunk_bytes)
+            if not chunk:
+                reached_eof = True
+                return False
+            buffer += chunk
+            return True
+
+        while not ended:
+            while True:
+                while position < len(buffer) and buffer[position].isspace():
+                    position += 1
+                if position < len(buffer):
+                    break
+                if not refill():
+                    if not started:
+                        raise ValueError("Input JSON is empty; expected a top-level array.")
+                    raise ValueError("Input JSON ended before its top-level array was closed.")
+
+            if not started:
+                if buffer[position] != "[":
+                    raise ValueError("Input JSON must contain a top-level array.")
+                started = True
+                position += 1
+                continue
+
+            token = buffer[position]
+            if expecting_value:
+                if token == "]":
+                    if saw_value:
+                        raise ValueError("Input JSON contains a trailing comma in its top-level array.")
+                    position += 1
+                    ended = True
+                    continue
+                try:
+                    value, end_position = decoder.raw_decode(buffer, position)
+                except json.JSONDecodeError as exc:
+                    if reached_eof or not refill():
+                        raise ValueError("Input JSON contains an invalid top-level array item.") from exc
+                    continue
+                position = end_position
+                expecting_value = False
+                saw_value = True
+                yield value
+                continue
+
+            if token == ",":
+                position += 1
+                expecting_value = True
+                continue
+            if token == "]":
+                position += 1
+                ended = True
+                continue
+            raise ValueError("Input JSON array items must be separated by commas.")
+
+        # Reject a second JSON value or any other non-whitespace suffix.
+        while True:
+            while position < len(buffer) and buffer[position].isspace():
+                position += 1
+            if position < len(buffer):
+                raise ValueError("Input JSON contains data after its top-level array.")
+            if not refill():
+                return
+
+
+def _precomputed_embedding_vector(record: dict[str, Any], index: int, embedding_field: str) -> np.ndarray:
+    value = record.get(embedding_field)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Story #{index} has no non-empty {embedding_field!r} list.")
+    try:
+        vector = np.asarray(value, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Story #{index} has a non-numeric {embedding_field!r} vector.") from exc
+    if vector.ndim != 1 or not np.isfinite(vector).all():
+        raise ValueError(f"Story #{index} has an invalid {embedding_field!r} vector.")
+    if float(np.linalg.norm(vector)) <= 0:
+        raise ValueError(f"Story #{index} has a zero-length {embedding_field!r} vector.")
+    return vector
+
+
+def _inspect_precomputed_dataset(source_path: Path, embedding_field: str) -> tuple[int, int]:
+    """Validate IDs and discover the fixed vector width in one streaming pass."""
+    record_ids: set[str] = set()
+    dimensions: int | None = None
+    record_count = 0
+    for index, raw_record in enumerate(_iter_json_array(source_path)):
+        if not isinstance(raw_record, dict):
+            raise ValueError(f"Story #{index} is not a JSON object.")
+        vector = _precomputed_embedding_vector(raw_record, index, embedding_field)
+        if dimensions is None:
+            dimensions = int(vector.size)
+        elif vector.size != dimensions:
+            raise ValueError(
+                f"Story #{index} has {vector.size} embedding dimensions; expected {dimensions}."
+            )
+        record_id = _record_id(raw_record, index)
+        if record_id in record_ids:
+            raise ValueError(f"Input JSON contains duplicate record ID {record_id!r}.")
+        record_ids.add(record_id)
+        record_count += 1
+    if not record_count or dimensions is None:
+        raise ValueError("Input JSON must contain at least one story with an embedding.")
+    return record_count, dimensions
+
+
+def _precomputed_build_fingerprint(
+    source_path: Path,
+    *,
+    embedding_field: str,
+    embedding_model: str,
+) -> str:
+    """Use file metadata so an unchanged 1+ GB source does not need re-reading."""
+    stat = source_path.stat()
+    material = json.dumps(
+        {
+            "store_version": VECTOR_STORE_VERSION,
+            "precomputed_import_version": PRECOMPUTED_IMPORT_VERSION,
+            "source_file": source_path.name,
+            "source_size": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "embedding_field": embedding_field,
+            "embedding_model": embedding_model,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _precomputed_store_is_current(destination: Path, fingerprint: str) -> bool:
+    """Fast-path a completed import without parsing the source JSON again."""
+    if not destination.is_file():
+        return False
+    try:
+        with np.load(destination, allow_pickle=False) as store:
+            required = {"embeddings", "records_json", "metadata_json"}
+            if not required.issubset(store.files):
+                return False
+            metadata = json.loads(str(store["metadata_json"].item()))
+            embeddings = store["embeddings"]
+        return bool(
+            metadata.get("store_version") == VECTOR_STORE_VERSION
+            and metadata.get("precomputed_import_version") == PRECOMPUTED_IMPORT_VERSION
+            and metadata.get("build_fingerprint") == fingerprint
+            and metadata.get("record_count") == embeddings.shape[0]
+            and metadata.get("embedding_dimensions") == embeddings.shape[1]
+            and metadata.get("vectors_normalized") is True
+            and embeddings.ndim == 2
+            and embeddings.shape[0] > 0
+            and np.isfinite(embeddings).all()
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, IndexError):
+        return False
+
+
+def import_precomputed_embeddings(
+    input_json_path: str,
+    output_db_path: str,
+    *,
+    embedding_field: str = "embedding",
+    embedding_model: str = DEFAULT_PRECOMPUTED_EMBEDDING_MODEL,
+) -> Path:
+    """Convert an embedded JSON dataset into the app's fast local NumPy store.
+
+    This performs no OpenAI API calls. It streams the large source file twice:
+    once to validate/count it and once to normalize/write its supplied vectors.
+    The stored records omit the original JSON embedding field, avoiding a second
+    bulky copy of every vector alongside the compact NumPy matrix.
+    """
+    if not isinstance(embedding_field, str) or not embedding_field.strip():
+        raise ValueError("embedding_field must be a non-empty string.")
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise ValueError("embedding_model must be a non-empty string.")
+    embedding_field = embedding_field.strip()
+    embedding_model = embedding_model.strip()
+    source_path = Path(input_json_path)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Dataset does not exist: {source_path}")
+    destination = Path(output_db_path)
+    if destination.suffix != ".npz":
+        destination = destination.with_suffix(".npz")
+    if source_path.resolve() == destination.resolve():
+        raise ValueError("The output vector store cannot overwrite its JSON source dataset.")
+
+    fingerprint = _precomputed_build_fingerprint(
+        source_path,
+        embedding_field=embedding_field,
+        embedding_model=embedding_model,
+    )
+    if _precomputed_store_is_current(destination, fingerprint):
+        logger.info("Precomputed vector store is current; no import is needed: %s", destination)
+        return destination
+
+    record_count, dimensions = _inspect_precomputed_dataset(source_path, embedding_field)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=destination.parent, suffix=".npy", delete=False) as temporary:
+        matrix_path = Path(temporary.name)
+
+    embeddings: np.ndarray | None = None
+    try:
+        embeddings = np.lib.format.open_memmap(
+            matrix_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=(record_count, dimensions),
+        )
+        records: list[dict[str, Any]] = []
+        for index, raw_record in enumerate(_iter_json_array(source_path)):
+            if not isinstance(raw_record, dict):
+                raise ValueError(f"Story #{index} is not a JSON object.")
+            vector = _precomputed_embedding_vector(raw_record, index, embedding_field)
+            if vector.size != dimensions:
+                raise ValueError(
+                    f"Story #{index} has {vector.size} embedding dimensions; expected {dimensions}."
+                )
+            embeddings[index] = vector / np.linalg.norm(vector)
+            # Keep the complete source metadata and summary, but do not duplicate
+            # thousands of floats per record inside records_json.
+            stored_record = {
+                key: value for key, value in raw_record.items() if key != embedding_field
+            }
+            stored_record["record_id"] = _record_id(stored_record, index)
+            records.append(stored_record)
+            if (index + 1) % 1_000 == 0 or index + 1 == record_count:
+                logger.info("Imported %d/%d precomputed story vectors", index + 1, record_count)
+
+        embeddings.flush()
+        metadata = {
+            "store_version": VECTOR_STORE_VERSION,
+            "build_fingerprint": fingerprint,
+            "source_file": source_path.name,
+            "source_size": source_path.stat().st_size,
+            "source_mtime_ns": source_path.stat().st_mtime_ns,
+            "record_count": record_count,
+            "embedding_model": embedding_model,
+            "embedding_dimensions": dimensions,
+            "vectors_normalized": True,
+            "precomputed_import_version": PRECOMPUTED_IMPORT_VERSION,
+            "precomputed_embedding_field": embedding_field,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_store(destination, embeddings, records, metadata)
+        logger.info(
+            "Saved %d supplied %s-dimensional story vectors to %s without OpenAI embedding calls",
+            record_count,
+            dimensions,
+            destination,
+        )
+        return destination
+    finally:
+        # Windows keeps an open memory-map handle until the Python reference is
+        # released, so close it before atomically removing the scratch matrix.
+        if embeddings is not None:
+            mapped_file = getattr(embeddings, "_mmap", None)
+            if mapped_file is not None:
+                mapped_file.close()
+            del embeddings
+        matrix_path.unlink(missing_ok=True)
 
 
 def process_and_embed_dataset(
