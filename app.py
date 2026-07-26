@@ -248,30 +248,6 @@ h1, h2, h3, h4 {
   opacity: 0.85;
   filter: drop-shadow(0 2px 4px rgba(42,37,32,0.12));
 }
-.card-play {
-  position: absolute;
-  bottom: 12px;
-  right: 12px;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: #ffffff;
-  color: var(--ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 14px rgba(42,37,32,0.18);
-  border: 2px solid rgba(255,255,255,0.9);
-  font-size: 1.1rem;
-  line-height: 1;
-  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
-  cursor: pointer;
-}
-.card:hover .card-play {
-  transform: scale(1.08);
-  background: var(--accent);
-  color: #ffffff;
-}
 .card-body {
   flex: 1 1 280px;
   padding: 1.25rem 1.4rem;
@@ -331,12 +307,6 @@ h1, h2, h3, h4 {
     flex: 1 1 100%;
     padding: 1rem;
   }
-  .card-play {
-    width: 54px;
-    height: 54px;
-    bottom: 14px;
-    right: 14px;
-    font-size: 1.25rem;
   }
 }
 
@@ -588,7 +558,6 @@ def render_card(item: dict, score: float | None = None) -> str:
       <div class="card-inner">
         <div class="card-thumbnail {safe_type}">
           <span class="card-art">{emoji}</span>
-          <div class="card-play" aria-label="Play">▶</div>
         </div>
         <div class="card-body">
           <div class="type-chip {safe_type}">{emoji} {_safe_text(raw_type)}</div>
@@ -615,7 +584,6 @@ def render_summary_card(item: dict, score: float) -> str:
       <div class="card-inner">
         <div class="card-thumbnail book">
           <span class="card-art">{emoji}</span>
-          <div class="card-play" aria-label="Play">▶</div>
         </div>
         <div class="card-body">
           <div class="type-chip book">Story summary · {score:.2f} match</div>
