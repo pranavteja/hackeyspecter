@@ -37,8 +37,12 @@ env:
   - name: STREAMLIT_CLIENT_TOOLBAR_MODE
     value: "minimal"
   # ---- App-level secrets (injected as env vars by Databricks Apps runtime) ----
+  # Format: <scope>/<key> (no secret:// prefix; runtime substitutes the value).
+  # If this still resolves empty, also try:
+  #   valueFrom: "secret://llm-secrets/openai-api-key"
+  #   valueFrom: "llm-secrets:openai-api-key"
   - name: OPENAI_API_KEY
-    valueFrom: "secret://llm-secrets/openai-api-key"
+    valueFrom: "llm-secrets/openai-api-key"
   # ---- Optional model overrides (defaults are defined in rag_config.py) ----
   - name: RAG_FEATURE_MODEL
     value: "gpt-4o-mini"

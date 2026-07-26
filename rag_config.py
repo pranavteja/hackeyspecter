@@ -110,43 +110,24 @@ def response_reasoning_options(model: str) -> dict[str, object]:
     return {}
 
 
-def _try_databricks_secret() -> str | None:
-    """Defensive fallback: fetch OPENAI_API_KEY from a Databricks secret via the SDK.
-
-    Returns the key and caches it in os.environ so downstream code works as if it
-    were injected by `valueFrom:` in app.yaml. Returns None on any failure.
-    """
-    try:
-        from databricks.sdk import WorkspaceClient  # type: ignore
-    except ImportError:
-        return None
-    try:
-        client = WorkspaceClient()
-        secret = client.secrets.get(scope=DATABRICKS_SECRET_SCOPE, key=DATABRICKS_SECRET_KEY)
-        value = getattr(secret, "value", None) or (str(secret) if secret else None)
-        if value:
-            os.environ["OPENAI_API_KEY"] = value
-            logger.info(
-                "Loaded OPENAI_API_KEY from Databricks secret %s/%s",
-                DATABRICKS_SECRET_SCOPE,
-                DATABRICKS_SECRET_KEY,
-            )
-            return value
-    except Exception as exc:
-        logger.debug("Databricks SDK secret lookup skipped: %s: %s", type(exc).__name__, exc)
-    return None
+def _diagnostic_missing_key_help() -> str:
+    """Return a checklist string explaining what to verify when the key is missing."""
+    return (
+        "OPENAI_API_KEY is not set. On Databricks Apps, verify:\n"
+        "  1. The secret exists in Databricks Secrets: scope=llm-secrets, key=openai-api-key\n"
+        "  2. The app's service principal has READ on that secret\n"
+        "  3. app.yaml references it via 'valueFrom: llm-secrets/openai-api-key'\n"
+        "  4. The Databricks Apps deployment is current (push + redeploy after edits)\n"
+        "Locally: set OPENAI_API_KEY in your .env file."
+    )
 
 
 @lru_cache(maxsize=1)
 def get_client() -> OpenAI:
     """Return one configured, retrying SDK client per application process."""
-    api_key = os.getenv("OPENAI_API_KEY") or _try_databricks_secret()
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "Set OPENAI_API_KEY in .env, the deployment environment, "
-            "or grant the Databricks Apps service principal read on "
-            f"secret {DATABRICKS_SECRET_SCOPE}/{DATABRICKS_SECRET_KEY}."
-        )
+        raise RuntimeError(_diagnostic_missing_key_help())
     return OpenAI(
         api_key=api_key,
         max_retries=OPENAI_MAX_RETRIES,
