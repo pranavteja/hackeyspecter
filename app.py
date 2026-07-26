@@ -728,6 +728,23 @@ with tab_concierge:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+            if isinstance(recommendation, dict):
+                recommended_story = next(
+                    (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
+                    results[0],
+                )
+                st.subheader(f"Recommended: {recommendation.get('recommended_book_title', 'Untitled')}")
+                st.markdown(str(recommendation.get("pitch_script", "")))
+                reasons = recommendation.get("emotional_match_reasons", [])
+                if isinstance(reasons, list) and reasons:
+                    st.markdown("**Why it fits:** " + " · ".join(str(reason) for reason in reasons))
+                if recommended_story.get("vector_similarity", 0) < 0.4:
+                    st.info(
+                        "We couldn't find a perfect match for your request. "
+                        "The recommendation above is our closest available story, "
+                        "but it may not fully capture the mood you described. "
+                        "Try rephrasing your request or exploring a different theme."
+                    )
             if recommendation is None and saved_weekend.get("rerank_state", "pending") == "pending":
                 try:
                     logger.info("[RAG] weekend concierge starting LLM rerank for query=%r", saved_weekend.get("query", ""))
@@ -797,6 +814,23 @@ with tab_festival:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+            if isinstance(recommendation, dict):
+                recommended_story = next(
+                    (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
+                    results[0],
+                )
+                st.subheader(f"Recommended: {recommendation.get('recommended_book_title', 'Untitled')}")
+                st.markdown(str(recommendation.get("pitch_script", "")))
+                reasons = recommendation.get("emotional_match_reasons", [])
+                if isinstance(reasons, list) and reasons:
+                    st.markdown("**Why it fits:** " + " · ".join(str(reason) for reason in reasons))
+                if recommended_story.get("vector_similarity", 0) < 0.4:
+                    st.info(
+                        "We couldn't find a perfect match for your request. "
+                        "The recommendation above is our closest available story, "
+                        "but it may not fully capture the mood you described. "
+                        "Try rephrasing your request or exploring a different theme."
+                    )
             if recommendation is None and saved_festival.get("rerank_state", "pending") == "pending":
                 try:
                     logger.info("[RAG] festival starting LLM rerank for query=%r", saved_festival.get("query", ""))
