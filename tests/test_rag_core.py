@@ -29,6 +29,17 @@ from search_engine import (
     load_database,
     vector_search,
 )
+from story_display import story_summary_preview
+
+
+class StoryDisplayTests(unittest.TestCase):
+    def test_hides_imported_metadata_and_stray_div_tags(self) -> None:
+        summary = "Friends reconnect in New York.</div>\n\nMetadata: novel_id: 26078 | url: very-happy"
+        self.assertEqual(story_summary_preview(summary), "Friends reconnect in New York.")
+
+    def test_preserves_and_truncates_reader_facing_summary(self) -> None:
+        self.assertEqual(story_summary_preview("A warm friendship story.", maximum_characters=50), "A warm friendship story.")
+        self.assertEqual(story_summary_preview("abcdefgh", maximum_characters=5), "abcde…")
 
 
 class VectorSearchTests(unittest.TestCase):

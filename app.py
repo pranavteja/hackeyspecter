@@ -26,6 +26,7 @@ from data.content import SAMPLE_PROMPTS
 from audio_utils import generate_summary_audio, is_playable_audio_url, transcribe_voice_input
 from recommend_and_pitch import generate_final_recommendation
 from search_engine import StoryDatabase, canonicalize_query, load_database, vector_search
+from story_display import story_summary_preview
 from vector_store import materialize_vector_store
 
 logging.basicConfig(
@@ -601,8 +602,7 @@ def render_card(item: dict, score: float | None = None) -> str:
 
 def render_summary_card(item: dict, score: float) -> str:
     """Render a result from the imported offline story-vector store."""
-    summary = str(item.get("summary", "")).strip()
-    preview = summary[:700] + ("…" if len(summary) > 700 else "")
+    preview = story_summary_preview(item.get("summary", ""))
     title = _safe_text(item.get("title", "Untitled"))
     link = str(item.get("librivox_project_url", ""))
     safe_link = _safe_text(link) if _is_safe_http_url(link) else ""
