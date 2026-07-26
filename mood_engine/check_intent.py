@@ -12,8 +12,24 @@ from typing import Any
 from rag_config import FEATURE_MODEL, get_client, response_reasoning_options
 
 logger = logging.getLogger(__name__)
-DEFAULT_VECTOR_STORE_PATH = Path(__file__).resolve().parents[1] / "ultimate_pocketfm_vector_store.npz"
-VECTOR_STORE_PATH = Path(os.getenv("RAG_VECTOR_STORE_PATH", str(DEFAULT_VECTOR_STORE_PATH))).expanduser()
+VECTOR_STORE_FILENAME = "ultimate_pocketfm_vector_store.npz"
+DEFAULT_VECTOR_STORE_PATH = Path(__file__).resolve().parents[1] / VECTOR_STORE_FILENAME
+
+
+def _resolve_vector_store_path() -> Path:
+    """Resolve a local override first, then a Databricks UC volume resource."""
+    explicit_path = os.getenv("RAG_VECTOR_STORE_PATH", "").strip()
+    if explicit_path:
+        return Path(explicit_path).expanduser()
+
+    volume_path = os.getenv("RAG_VECTOR_STORE_VOLUME", "").strip()
+    if volume_path:
+        return Path(volume_path).expanduser() / VECTOR_STORE_FILENAME
+
+    return DEFAULT_VECTOR_STORE_PATH
+
+
+VECTOR_STORE_PATH = _resolve_vector_store_path()
 
 MODEL = FEATURE_MODEL
 MAX_INPUT_CHARACTERS = 4_000

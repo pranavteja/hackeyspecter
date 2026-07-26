@@ -77,6 +77,12 @@ top five matches render before the automatic reranker is asked to write a
 pitch. Keep the source JSON and generated NPZ out of Git; use artifact storage
 for deployment.
 
+For Databricks Apps, upload `ultimate_pocketfm_vector_store.npz` to a Unity
+Catalog volume, add that volume to the app as a **Can read** resource with the
+key `story_vectors`, and deploy this configuration. The app receives the volume
+path through `RAG_VECTOR_STORE_VOLUME` and loads
+`/Volumes/<catalog>/<schema>/<volume>/ultimate_pocketfm_vector_store.npz`.
+
 The default quality profile uses `gpt-5.6-terra` with low reasoning for live
 reranking and `text-embedding-3-large` at 3072 dimensions for the one query
 embedding. `process_and_embed_dataset()` remains available only for a source
