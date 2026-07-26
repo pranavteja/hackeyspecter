@@ -1,12 +1,22 @@
 """Shared configuration and OpenAI client creation for the story RAG pipeline."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from functools import lru_cache
 from pathlib import Path
 
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+# Databricks secret path: scope=llm-secrets, key=openai-api-key.
+# The valueFrom: reference in app.yaml handles injection on Databricks Apps;
+# this function is a defensive fallback for environments where valueFrom is
+# unavailable (local Databricks notebook, custom runtimes, etc.).
+DATABRICKS_SECRET_SCOPE = "llm-secrets"
+DATABRICKS_SECRET_KEY = "openai-api-key"
 
 
 def _load_local_env() -> None:
@@ -100,12 +110,43 @@ def response_reasoning_options(model: str) -> dict[str, object]:
     return {}
 
 
+def _try_databricks_secret() -> str | None:
+    """Defensive fallback: fetch OPENAI_API_KEY from a Databricks secret via the SDK.
+
+    Returns the key and caches it in os.environ so downstream code works as if it
+    were injected by `valueFrom:` in app.yaml. Returns None on any failure.
+    """
+    try:
+        from databricks.sdk import WorkspaceClient  # type: ignore
+    except ImportError:
+        return None
+    try:
+        client = WorkspaceClient()
+        secret = client.secrets.get(scope=DATABRICKS_SECRET_SCOPE, key=DATABRICKS_SECRET_KEY)
+        value = getattr(secret, "value", None) or (str(secret) if secret else None)
+        if value:
+            os.environ["OPENAI_API_KEY"] = value
+            logger.info(
+                "Loaded OPENAI_API_KEY from Databricks secret %s/%s",
+                DATABRICKS_SECRET_SCOPE,
+                DATABRICKS_SECRET_KEY,
+            )
+            return value
+    except Exception as exc:
+        logger.debug("Databricks SDK secret lookup skipped: %s: %s", type(exc).__name__, exc)
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_client() -> OpenAI:
     """Return one configured, retrying SDK client per application process."""
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY") or _try_databricks_secret()
     if not api_key:
-        raise RuntimeError("Set OPENAI_API_KEY in .env or the deployment environment.")
+        raise RuntimeError(
+            "Set OPENAI_API_KEY in .env, the deployment environment, "
+            "or grant the Databricks Apps service principal read on "
+            f"secret {DATABRICKS_SECRET_SCOPE}/{DATABRICKS_SECRET_KEY}."
+        )
     return OpenAI(
         api_key=api_key,
         max_retries=OPENAI_MAX_RETRIES,

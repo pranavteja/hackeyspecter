@@ -36,8 +36,15 @@ env:
     value: "light"
   - name: STREAMLIT_CLIENT_TOOLBAR_MODE
     value: "minimal"
-  # ---- App-level env vars (none needed yet — add API keys/secrets here) ----
-  # If you later wire an LLM provider, put the key in a Databricks secret
-  # and reference it like:
-  #   - name: OPENAI_API_KEY
-  #     valueFrom: openai-api-key   # name of a registered secret
+  # ---- App-level secrets (injected as env vars by Databricks Apps runtime) ----
+  - name: OPENAI_API_KEY
+    valueFrom: "secret://llm-secrets/openai-api-key"
+  # ---- Optional model overrides (defaults are defined in rag_config.py) ----
+  - name: RAG_FEATURE_MODEL
+    value: "gpt-4o-mini"
+  - name: RAG_RERANK_MODEL
+    value: "gpt-4o"
+  - name: RAG_EMBEDDING_MODEL
+    value: "text-embedding-3-large"
+  - name: RAG_TTS_MODEL
+    value: "gpt-4o-mini-tts"

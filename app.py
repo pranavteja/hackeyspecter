@@ -12,6 +12,9 @@ import random
 import logging
 import hashlib
 import html
+import os
+import time
+import traceback
 from pathlib import Path
 from typing import Callable, TypeVar
 from urllib.parse import urlparse
@@ -437,10 +440,73 @@ def _is_safe_http_url(value: object) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _record_diagnostic(action: str, exc: BaseException, level: str = "error") -> None:
+    """Append a structured error record to the Diagnostics panel."""
+    entry = {
+        "ts": time.time(),
+        "level": level,
+        "action": action,
+        "type": type(exc).__name__,
+        "message": str(exc) or "(no message)",
+        "traceback": "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).rstrip(),
+    }
+    history: list[dict] = st.session_state.setdefault("diagnostics_errors", [])
+    history.append(entry)
+    if len(history) > 20:
+        del history[: len(history) - 20]
+
+
 def _show_operation_error(action: str, exc: Exception) -> None:
     """Keep implementation details in logs while showing users a stable recovery path."""
     logger.exception("%s failed", action, exc_info=exc)
+    _record_diagnostic(action, exc)
     st.error(f"{action} could not run. Please check your connection and try again.")
+
+
+MAX_DIAGNOSTIC_ENTRIES = 20
+
+
+def render_diagnostics_panel() -> None:
+    """Main-page expander: env status + recent error tracebacks for easy relay."""
+    errors: list[dict] = st.session_state.get("diagnostics_errors", [])
+    n = len(errors)
+    label = f"🔧 Diagnostics ({n})" if n else "🔧 Diagnostics"
+    with st.expander(label, expanded=(n > 0)):
+        st.markdown("**Environment**")
+        key = os.environ.get("OPENAI_API_KEY", "")
+        key_status = "✅ set" if key else "❌ NOT SET"
+        st.markdown(f"- `OPENAI_API_KEY`: {key_status} ({len(key)} chars)")
+        for var in (
+            "RAG_RERANK_MODEL",
+            "RAG_EMBEDDING_MODEL",
+            "RAG_FEATURE_MODEL",
+            "RAG_TTS_MODEL",
+            "RAG_TRANSCRIPTION_MODEL",
+        ):
+            st.markdown(f"- `{var}`: `{os.environ.get(var, '<default>')}`")
+
+        st.markdown("---")
+        st.markdown(f"**Recent errors ({n})**")
+        if n == 0:
+            st.caption("No errors recorded yet.")
+        else:
+            if st.button("Clear error log", key="diag_clear", use_container_width=True):
+                st.session_state["diagnostics_errors"] = []
+                st.rerun()
+            for i, entry in enumerate(reversed(errors), 1):
+                with st.container():
+                    ts = time.strftime("%H:%M:%S", time.localtime(entry["ts"]))
+                    st.markdown(
+                        f"**{i}. {entry['action']}** · `{entry['type']}` · {ts}"
+                    )
+                    st.caption(entry["message"][:200])
+                    with st.popover("Traceback", use_container_width=True):
+                        st.code(entry["traceback"], language="text")
+
+
+render_diagnostics_panel()
 
 
 def render_card(item: dict, score: float | None = None) -> str:
@@ -903,10 +969,19 @@ with tab_context:
             st.warning("Enter a story, mood, or theme before searching.")
         else:
             try:
-            # This critical path makes one query-embedding request, then exact
-            # local NumPy ranking. GPT reranking is deliberately deferred.
+                # This critical path makes one query-embedding request, then exact
+                # local NumPy ranking. GPT reranking is deliberately deferred.
+                logger.info("[RAG] story search submitted: query=%r", search_request)
                 with st.spinner("Finding the closest semantic story matches..."):
                     candidates = run_story_retrieval(search_request)
+                    logger.info(
+                        "[RAG] vector search returned %d candidates: %s",
+                        len(candidates),
+                        ", ".join(
+                            f"{c.get('title', '?')[:40]}@{float(c.get('vector_similarity', 0.0)):.3f}"
+                            for c in candidates
+                        ),
+                    )
                     st.session_state.story_search = {
                         "query": search_request,
                         "candidates": candidates,
@@ -920,6 +995,10 @@ with tab_context:
                         # from being transcribed again on the following rerun.
                         st.session_state.pop("voice_story_request", None)
             except Exception as exc:
+                logger.warning(
+                    "[RAG] retrieval FAILED for query=%r: %s: %s",
+                    search_request, type(exc).__name__, exc,
+                )
                 _show_operation_error("Story search", exc)
 
     saved_search = st.session_state.get("story_search")
@@ -990,16 +1069,31 @@ with tab_context:
                     # This second spinner is intentionally independent from
                     # retrieval: the semantic cards above remain visible while
                     # the model writes the final personalized pitch.
+                    logger.info("[RAG] starting LLM rerank for query=%r", saved_search.get("query", ""))
                     with st.spinner("Writing your personalized recommendation..."):
                         saved_search["recommendation"] = run_story_rerank(
                             str(saved_search.get("query", "")),
                             results,
+                        )
+                        rec = saved_search["recommendation"]
+                        logger.info(
+                            "[RAG] rerank complete: title=%r record_id=%s reasons=%d pitch_len=%d",
+                            rec.get("recommended_book_title"),
+                            rec.get("recommended_record_id"),
+                            len(rec.get("emotional_match_reasons", [])),
+                            len(rec.get("pitch_script", "")),
                         )
                         saved_search["rerank_state"] = "complete"
                         st.session_state.story_search = saved_search
                         st.session_state.pop("recommendation_audio", None)
                     st.rerun()
                 except Exception as exc:
+                    logger.warning(
+                        "[RAG] rerank FAILED for query=%r: %s: %s",
+                        saved_search.get("query", ""),
+                        type(exc).__name__,
+                        exc,
+                    )
                     saved_search["rerank_state"] = "failed"
                     st.session_state.story_search = saved_search
                     _show_operation_error("Personalized pitch", exc)
