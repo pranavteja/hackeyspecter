@@ -458,6 +458,43 @@ def _record_diagnostic(action: str, exc: BaseException, level: str = "error") ->
         del history[: len(history) - 20]
 
 
+def _format_diagnostics_blob(errors: list[dict]) -> str:
+    """Format env status + all errors as a single text blob for paste/relay."""
+    lines: list[str] = []
+    lines.append("=" * 70)
+    lines.append("HACKEY SPECTER — DIAGNOSTICS")
+    lines.append(f"Captured at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 70)
+    lines.append("")
+    lines.append("ENVIRONMENT")
+    lines.append("-" * 70)
+    key = os.environ.get("OPENAI_API_KEY", "")
+    lines.append(f"OPENAI_API_KEY: {'SET' if key else 'NOT SET'} ({len(key)} chars)")
+    for var in (
+        "RAG_RERANK_MODEL",
+        "RAG_EMBEDDING_MODEL",
+        "RAG_FEATURE_MODEL",
+        "RAG_TTS_MODEL",
+        "RAG_TRANSCRIPTION_MODEL",
+        "OPENAI_TIMEOUT_SECONDS",
+    ):
+        lines.append(f"{var}: {os.environ.get(var, '<default>')}")
+    lines.append("")
+    lines.append(f"ERRORS ({len(errors)})")
+    lines.append("-" * 70)
+    if not errors:
+        lines.append("(none)")
+    for i, e in enumerate(errors, 1):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["ts"]))
+        lines.append("")
+        lines.append(f"[{i}] {e['action']} — {e['type']} — {ts}")
+        lines.append(f"    message: {e['message']}")
+        lines.append("    traceback:")
+        for tb_line in e["traceback"].splitlines():
+            lines.append(f"      {tb_line}")
+    return "\n".join(lines)
+
+
 def _show_operation_error(action: str, exc: Exception) -> None:
     """Keep implementation details in logs while showing users a stable recovery path."""
     logger.exception("%s failed", action, exc_info=exc)
@@ -501,9 +538,18 @@ def render_diagnostics_panel() -> None:
                     st.markdown(
                         f"**{i}. {entry['action']}** · `{entry['type']}` · {ts}"
                     )
-                    st.caption(entry["message"][:200])
-                    with st.popover("Traceback", use_container_width=True):
-                        st.code(entry["traceback"], language="text")
+                    st.markdown(f"> {entry['message'][:300]}")
+                    st.code(entry["traceback"], language="text")
+
+            # Single-click blob of the whole diagnostics state for easy paste
+            blob = _format_diagnostics_blob(errors)
+            st.download_button(
+                "📋 Copy full diagnostics (download .txt)",
+                data=blob,
+                file_name=f"diagnostics-{int(time.time())}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
 
 
 render_diagnostics_panel()
