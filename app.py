@@ -728,6 +728,14 @@ with tab_concierge:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+                rec_id = item.get("record_id", "")
+                if rec_id:
+                    audio_key = f"audio_{rec_id}"
+                    if st.button("▶ Play summary", key=f"play_weekend_{rec_id}"):
+                        with st.spinner("Generating audio..."):
+                            st.session_state[audio_key] = generate_summary_audio(item)
+                    if audio_key in st.session_state:
+                        st.audio(st.session_state[audio_key], format="audio/mpeg")
             if isinstance(recommendation, dict):
                 recommended_story = next(
                     (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
@@ -814,6 +822,14 @@ with tab_festival:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+                rec_id = item.get("record_id", "")
+                if rec_id:
+                    audio_key = f"audio_{rec_id}"
+                    if st.button("▶ Play summary", key=f"play_festival_{rec_id}"):
+                        with st.spinner("Generating audio..."):
+                            st.session_state[audio_key] = generate_summary_audio(item)
+                    if audio_key in st.session_state:
+                        st.audio(st.session_state[audio_key], format="audio/mpeg")
             if isinstance(recommendation, dict):
                 recommended_story = next(
                     (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
@@ -1015,6 +1031,14 @@ with tab_mood:
                     render_summary_card(item, item.get("vector_similarity", 0.0)),
                     unsafe_allow_html=True,
                 )
+                rec_id = item.get("record_id", "")
+                if rec_id:
+                    audio_key = f"audio_{rec_id}"
+                    if st.button("▶ Play summary", key=f"play_mood_{rec_id}"):
+                        with st.spinner("Generating audio..."):
+                            st.session_state[audio_key] = generate_summary_audio(item)
+                    if audio_key in st.session_state:
+                        st.audio(st.session_state[audio_key], format="audio/mpeg")
             if recommendation is None and saved_search.get("rerank_state", "pending") == "pending":
                 try:
                     # This second spinner is intentionally independent from
