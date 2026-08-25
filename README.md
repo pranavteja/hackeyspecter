@@ -32,6 +32,29 @@ python3 -m venv .venv
 
 The app expects `ultimate_pocketfm_vector_store.npz` in the repository root, or a full path in `RAG_VECTOR_STORE_PATH`.
 
+### Free/local model mode
+
+The app can run without OpenAI API credits using Ollama. Install Ollama, then pull a model:
+
+```bash
+ollama pull llama3.2
+```
+
+Set these values in `.env`:
+
+```text
+RAG_LLM_PROVIDER=ollama
+RAG_FEATURE_MODEL=llama3.2
+RAG_RERANK_MODEL=llama3.2
+RAG_SEARCH_MODE=auto
+```
+
+In this mode intent extraction and recommendations use Ollama, and story retrieval uses the local lexical fallback instead of paid embedding requests. No OpenAI API key is needed. For free local voice transcription, install `faster-whisper`. Summary audio uses the operating system's offline speech engine through `pyttsx3`; existing story audio can also play.
+
+```bash
+pip install faster-whisper
+```
+
 ## Deploy to Databricks Apps
 
 Keep the 449 MB vector-store file out of Git. Upload it to a Unity Catalog volume, grant the App service principal `USE CATALOG`, `USE SCHEMA`, and `READ VOLUME`, then deploy:

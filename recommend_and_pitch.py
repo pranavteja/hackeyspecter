@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
-from rag_config import RERANK_MODEL, get_client, response_reasoning_options
+from rag_config import RERANK_MODEL, LLM_PROVIDER, generate_json, get_client, response_reasoning_options
+
+logger = logging.getLogger(__name__)
 
 # Feature-enriched stores carry atmospheric keywords and emotional axes; stores
 # imported from supplied embeddings use the original summary as their compact
@@ -75,24 +78,47 @@ def generate_final_recommendation(user_prompt: str, top_5_candidates: list[dict[
     if len(by_id) != len(candidates):
         raise ValueError("Retrieved candidates must have unique record IDs.")
 
-    response = get_client().responses.create(
-        model=RERANK_MODEL,
-        instructions=(
+    instructions = (
             "Analyze the user's requested mood and select exactly one supplied candidate. "
             "Never invent or select a record ID. Write exactly two compelling sentences for pitch_script. "
             "Explain the emotional fit in concise emotional_match_reasons."
-        ),
-        input=json.dumps({"user_prompt": prompt, "candidates": candidates}, ensure_ascii=False),
-        text={"format": {"type": "json_schema", **RECOMMENDATION_SCHEMA}},
-        max_output_tokens=MAX_RERANK_OUTPUT_TOKENS,
-        store=False,
-        prompt_cache_key="story-rerank-v2",
-        **response_reasoning_options(RERANK_MODEL),
     )
-    if not response.output_text:
+    user_input = json.dumps({"user_prompt": prompt, "candidates": candidates}, ensure_ascii=False)
+    if LLM_PROVIDER == "openai":
+        response = get_client().responses.create(
+            model=RERANK_MODEL, instructions=instructions, input=user_input,
+            text={"format": {"type": "json_schema", **RECOMMENDATION_SCHEMA}},
+            max_output_tokens=MAX_RERANK_OUTPUT_TOKENS, store=False,
+            prompt_cache_key="story-rerank-v2", **response_reasoning_options(RERANK_MODEL),
+        )
+        output_text = response.output_text or ""
+    else:
+        try:
+            output_text = generate_json(RERANK_MODEL, instructions, user_input, RECOMMENDATION_SCHEMA, max_output_tokens=MAX_RERANK_OUTPUT_TOKENS)
+        except Exception as exc:
+            # Local mode must remain usable when Ollama is stopped or not installed.
+            # The retrieved ranking is already deterministic, so select its first item
+            # and build a bounded pitch without any network call.
+            if LLM_PROVIDER != "ollama":
+                raise
+            logger.warning("Local pitch model unavailable; using deterministic fallback: %s", exc)
+            selected = top_5_candidates[0]
+            title = str(selected.get("title", "this story")).strip() or "this story"
+            keywords = [str(value).strip().lower() for value in selected.get("keywords", []) if str(value).strip()][:3]
+            reasons = [f"It matches your request for {prompt[:120]}."]
+            if keywords:
+                reasons.append("Its themes include " + ", ".join(keywords) + ".")
+            return {
+                "recommended_record_id": str(selected.get("record_id", "")),
+                "recommended_book_title": title,
+                "audio_url": str(selected.get("audio_url") or selected.get("audio_zip_url") or ""),
+                "pitch_script": f"{title} is a strong match for the mood you described. Start here for a story shaped around that feeling.",
+                "emotional_match_reasons": reasons,
+            }
+    if not output_text:
         raise ValueError("Reranking model returned empty content.")
     try:
-        result = json.loads(response.output_text)
+        result = json.loads(output_text)
     except json.JSONDecodeError as exc:
         raise ValueError("Reranking model returned invalid JSON.") from exc
 
