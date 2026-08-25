@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from concurrent.futures import Future
 from threading import Lock
 from time import perf_counter
@@ -22,6 +23,7 @@ from rag_config import (
     get_client,
     EMBEDDING_MODEL,
     EMBEDDING_DIMENSIONS,
+    LLM_PROVIDER,
 )
 
 MAX_QUERY_CHARACTERS = 4_000
@@ -245,6 +247,8 @@ def vector_search(user_prompt: str, database: StoryDatabase, top_k: int = 5) -> 
         raise ValueError("top_k must be at least 1.")
     if not database.records:
         raise ValueError("The vector store contains no searchable stories.")
+    if LLM_PROVIDER != "openai" and os.getenv("RAG_SEARCH_MODE", "auto").lower() in {"auto", "lexical"}:
+        return _local_vector_search(prompt, database.records, top_k)
     if database.embeddings.ndim != 2 or database.embeddings.shape != (
         len(database.records),
         database.embedding_dimensions,
@@ -302,3 +306,55 @@ def vector_search(user_prompt: str, database: StoryDatabase, top_k: int = 5) -> 
         len(results),
     )
     return results
+
+
+def _lexical_search(prompt: str, records: tuple[dict[str, Any], ...], top_k: int) -> list[dict[str, Any]]:
+    """Backward-compatible alias for the local vector fallback."""
+    return _local_vector_search(prompt, records, top_k)
+
+
+def _local_vector_search(prompt: str, records: tuple[dict[str, Any], ...], top_k: int) -> list[dict[str, Any]]:
+    """Offline TF-IDF cosine search when the neural embedding service is unavailable."""
+    import heapq
+    import re
+    from collections import Counter
+    stopwords = {"the", "and", "for", "with", "that", "this", "from", "want", "find", "story", "about", "something"}
+    def tokens(value: str) -> list[str]:
+        return [term for term in re.findall(r"[a-z0-9]{3,}", value.lower()) if term not in stopwords]
+
+    query_tokens = tokens(prompt)
+    query_counts = Counter(query_tokens)
+    document_frequency: Counter[str] = Counter()
+    for record in records:
+        title = str(record.get("title", "")).lower()
+        # Repeat title tokens to make titles slightly more influential.
+        text = " ".join(str(record.get(key, "")) for key in ("title", "summary", "rich_descriptive_paragraph", "keywords"))
+        document_frequency.update(set(tokens(text) + tokens(title)))
+    if not query_counts:
+        return []
+    total_documents = len(records)
+    query_weights = {
+        term: count * (np.log((1.0 + total_documents) / (1.0 + document_frequency[term])) + 1.0)
+        for term, count in query_counts.items()
+    }
+    query_norm = max(sum(weight * weight for weight in query_weights.values()) ** 0.5, 1e-8)
+    top: list[tuple[float, str, int]] = []
+    for row, record in enumerate(records):
+        title = str(record.get("title", "")).lower()
+        text = " ".join(str(record.get(key, "")) for key in ("title", "summary", "rich_descriptive_paragraph", "keywords"))
+        counts = Counter(tokens(text) + tokens(title))
+        weights = {
+            term: count * (np.log((1.0 + total_documents) / (1.0 + document_frequency[term])) + 1.0)
+            for term, count in counts.items()
+        }
+        dot = sum(query_weights.get(term, 0.0) * weight for term, weight in weights.items())
+        norm = max(sum(weight * weight for weight in weights.values()) ** 0.5, 1e-8)
+        score = float(dot / (query_norm * norm))
+        tie = hashlib.sha256(f"{prompt}\0{record.get('record_id', '')}".encode("utf-8")).hexdigest()
+        item = (score, tie, row)
+        if len(top) < top_k:
+            heapq.heappush(top, item)
+        elif item > top[0]:
+            heapq.heapreplace(top, item)
+    selected = sorted(top, reverse=True)
+    return [{**records[row], "vector_similarity": score} for score, _, row in selected]

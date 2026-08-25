@@ -199,6 +199,15 @@ class AudioTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "record object"):
             summary_for_speech("not a record")  # type: ignore[arg-type]
 
+    def test_excludes_imported_metadata_from_summary_speech(self) -> None:
+        script = summary_for_speech(
+            {
+                "title": "Very Happy",
+                "summary": "Friends celebrate together.</div>\n\nMetadata: novel_id: 26078 | url: very-happy",
+            }
+        )
+        self.assertEqual(script, "Very Happy. Friends celebrate together.")
+
     @patch("audio_utils.get_client")
     def test_rejects_empty_tts_audio_content(self, mock_client: object) -> None:
         _generate_tts_audio.cache_clear()

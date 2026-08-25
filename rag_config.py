@@ -4,6 +4,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
+import urllib.parse
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
@@ -70,6 +73,30 @@ _load_local_env()
 # cheaper or lower-latency deployment profile is required.
 FEATURE_MODEL = os.getenv("RAG_FEATURE_MODEL", "gpt-5.6-sol")
 RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "gpt-5.6-terra")
+LLM_PROVIDER = os.getenv("RAG_LLM_PROVIDER", "ollama").strip().lower()
+if LLM_PROVIDER not in {"openai", "ollama", "groq", "gemini"}:
+    raise ValueError("RAG_LLM_PROVIDER must be one of: openai, ollama, groq, gemini.")
+if LLM_PROVIDER == "ollama":
+    FEATURE_MODEL = os.getenv("RAG_FEATURE_MODEL", "llama3.2")
+    RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "llama3.2")
+    if FEATURE_MODEL.startswith("gpt-"):
+        FEATURE_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+    if RERANK_MODEL.startswith("gpt-"):
+        RERANK_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+elif LLM_PROVIDER == "groq":
+    FEATURE_MODEL = os.getenv("RAG_FEATURE_MODEL", "llama-3.3-70b-versatile")
+    RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "llama-3.3-70b-versatile")
+    if FEATURE_MODEL.startswith("gpt-"):
+        FEATURE_MODEL = "llama-3.3-70b-versatile"
+    if RERANK_MODEL.startswith("gpt-"):
+        RERANK_MODEL = "llama-3.3-70b-versatile"
+elif LLM_PROVIDER == "gemini":
+    FEATURE_MODEL = os.getenv("RAG_FEATURE_MODEL", "gemini-2.0-flash")
+    RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "gemini-2.0-flash")
+    if FEATURE_MODEL.startswith("gpt-"):
+        FEATURE_MODEL = "gemini-2.0-flash"
+    if RERANK_MODEL.startswith("gpt-"):
+        RERANK_MODEL = "gemini-2.0-flash"
 EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-3-large")
 _DEFAULT_EMBEDDING_DIMENSIONS = 1536 if EMBEDDING_MODEL == "text-embedding-3-small" else 3072
 EMBEDDING_DIMENSIONS = _positive_int("RAG_EMBEDDING_DIMENSIONS", _DEFAULT_EMBEDDING_DIMENSIONS)
@@ -164,11 +191,59 @@ def _discover_openai_key() -> str | None:
 @lru_cache(maxsize=1)
 def get_client() -> OpenAI:
     """Return one configured, retrying SDK client per application process."""
+    if LLM_PROVIDER == "ollama":
+        return OpenAI(
+            api_key="ollama",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            max_retries=0,
+            timeout=OPENAI_TIMEOUT_SECONDS,
+        )
+    if LLM_PROVIDER == "groq":
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY is not set. Add a Groq API key or choose RAG_LLM_PROVIDER=ollama.")
+        return OpenAI(
+            api_key=api_key,
+            base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            max_retries=OPENAI_MAX_RETRIES,
+            timeout=OPENAI_TIMEOUT_SECONDS,
+        )
     api_key = _discover_openai_key()
-    if not api_key:
+    if not api_key and LLM_PROVIDER != "gemini":
         raise RuntimeError(_diagnostic_missing_key_help())
+    if LLM_PROVIDER == "gemini":
+        return OpenAI(api_key="gemini-placeholder", max_retries=0, timeout=OPENAI_TIMEOUT_SECONDS)
     return OpenAI(
         api_key=api_key,
         max_retries=OPENAI_MAX_RETRIES,
         timeout=OPENAI_TIMEOUT_SECONDS,
     )
+
+
+def generate_json(model: str, instructions: str, user_input: str, schema: dict[str, object], *, max_output_tokens: int) -> str:
+    """Generate JSON through the configured provider while keeping callers provider-agnostic."""
+    if LLM_PROVIDER in {"openai"}:
+        response = get_client().responses.create(
+            model=model, instructions=instructions, input=user_input,
+            text={"format": {"type": "json_schema", **schema}},
+            max_output_tokens=max_output_tokens, store=False,
+            **response_reasoning_options(model),
+        )
+        return response.output_text or ""
+    if LLM_PROVIDER in {"ollama", "groq"}:
+        response = get_client().chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": instructions}, {"role": "user", "content": user_input}],
+            response_format={"type": "json_object"},
+            max_tokens=max_output_tokens,
+        )
+        return response.choices[0].message.content or ""
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set. Add a Gemini key or choose RAG_LLM_PROVIDER=ollama.")
+    url = "https://generativelanguage.googleapis.com/v1beta/models/" + urllib.parse.quote(model) + ":generateContent?key=" + urllib.parse.quote(api_key)
+    payload = {"systemInstruction": {"parts": [{"text": instructions}]}, "contents": [{"role": "user", "parts": [{"text": user_input}]}], "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": max_output_tokens}}
+    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=OPENAI_TIMEOUT_SECONDS) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    return body["candidates"][0]["content"]["parts"][0]["text"]

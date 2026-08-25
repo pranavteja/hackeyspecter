@@ -755,7 +755,7 @@ with tab_concierge:
                         with st.spinner("Generating audio..."):
                             st.session_state[audio_key] = generate_summary_audio(item)
                     if audio_key in st.session_state:
-                        st.audio(st.session_state[audio_key], format="audio/mpeg")
+                        st.audio(st.session_state[audio_key], format="audio/wav")
             if isinstance(recommendation, dict):
                 recommended_story = next(
                     (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
@@ -846,7 +846,7 @@ with tab_festival:
                         with st.spinner("Generating audio..."):
                             st.session_state[audio_key] = generate_summary_audio(item)
                     if audio_key in st.session_state:
-                        st.audio(st.session_state[audio_key], format="audio/mpeg")
+                        st.audio(st.session_state[audio_key], format="audio/wav")
             if isinstance(recommendation, dict):
                 recommended_story = next(
                     (item for item in results if item.get("record_id") == recommendation.get("recommended_record_id")),
@@ -900,7 +900,7 @@ with tab_mood:
             # not retried on every unrelated Streamlit rerun.
             st.session_state.last_voice_recording_id = recording_id
             try:
-                with st.spinner("You finished speaking — transcribing with OpenAI…"):
+                with st.spinner("You finished speaking — transcribing locally…"):
                     transcript = transcribe_voice_input(
                         voice_bytes,
                         voice_recording.name or "story-request.wav",
@@ -1024,7 +1024,7 @@ with tab_mood:
             if is_playable_audio_url(source_audio_url):
                 if st.button("Play recommendation", key="play_recommendation_source"):
                     st.session_state.recommendation_audio = ("source", source_audio_url)
-            elif st.button("Play story summary with OpenAI", key="play_recommendation_summary"):
+            elif st.button("Play generated story summary", key="play_recommendation_summary"):
                 try:
                     with st.spinner("Creating summary audio..."):
                         st.session_state.recommendation_audio = (
@@ -1040,7 +1040,7 @@ with tab_mood:
                 if source == "source":
                     st.audio(audio)
                 else:
-                    st.audio(audio, format="audio/mpeg")
+                    st.audio(audio, format="audio/wav")
         st.markdown("### Closest semantic matches")
         if results:
             for item in results:
@@ -1052,7 +1052,7 @@ with tab_mood:
                         with st.spinner("Generating audio..."):
                             st.session_state[audio_key] = generate_summary_audio(item)
                     if audio_key in st.session_state:
-                        st.audio(st.session_state[audio_key], format="audio/mpeg")
+                        st.audio(st.session_state[audio_key], format="audio/wav")
             if recommendation is None and saved_search.get("rerank_state", "pending") == "pending":
                 try:
                     # This second spinner is intentionally independent from

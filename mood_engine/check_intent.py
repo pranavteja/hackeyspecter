@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from rag_config import FEATURE_MODEL, get_client, response_reasoning_options
+from rag_config import FEATURE_MODEL, LLM_PROVIDER, generate_json, get_client, response_reasoning_options
 from vector_store import materialize_vector_store
 
 logger = logging.getLogger(__name__)
@@ -66,22 +66,35 @@ def check_intent(user_input: str) -> dict[str, Any]:
         raise ValueError(f"Search input must be at most {MAX_INPUT_CHARACTERS:,} characters.")
 
     logger.info("OpenAI intent model starting: model=%s", MODEL)
-    response = get_client().responses.create(
-        model=MODEL,
-        instructions=(
+    instructions = (
             "Extract entertainment-search intent. Return a concise intent, 3-8 lowercase "
             "keywords, and a concise search query. Do not include unsupported claims."
-        ),
-        input=text,
-        text={"format": {"type": "json_schema", **INTENT_SCHEMA}},
-        max_output_tokens=220,
-        store=False,
-        prompt_cache_key="story-intent-v1",
-        **response_reasoning_options(MODEL),
     )
-    logger.info("OpenAI intent model output received: %d characters", len(response.output_text or ""))
+    if LLM_PROVIDER == "openai":
+        response = get_client().responses.create(
+            model=MODEL, instructions=instructions, input=text,
+            text={"format": {"type": "json_schema", **INTENT_SCHEMA}},
+            max_output_tokens=220, store=False, prompt_cache_key="story-intent-v1",
+            **response_reasoning_options(MODEL),
+        )
+        output_text = response.output_text or ""
+    else:
+        try:
+            output_text = generate_json(MODEL, instructions, text, INTENT_SCHEMA, max_output_tokens=220)
+        except Exception as exc:
+            # Keep local mode usable when Ollama is unavailable. Search already
+            # has a lexical fallback, so a lightweight intent is sufficient.
+            if LLM_PROVIDER != "ollama":
+                raise
+            logger.warning("Local intent model unavailable; using deterministic fallback: %s", exc)
+            words = [word.lower() for word in re.findall(r"[A-Za-z][A-Za-z'-]{2,}", text)]
+            keywords = list(dict.fromkeys(words))[:8]
+            while len(keywords) < 3:
+                keywords.append(("story", "mood", "drama")[len(keywords) - 1])
+            return {"intent": "story search", "keywords": keywords, "query": text, "user_input": text}
+    logger.info("Intent model output received: %d characters", len(output_text))
     try:
-        result = _parse_json_object(response.output_text)
+        result = _parse_json_object(output_text)
     except json.JSONDecodeError as exc:
         raise ValueError("The model did not return valid JSON. Please try again.") from exc
 
